@@ -43,6 +43,8 @@ packages/
    ```
 
 The web app runs at <http://localhost:3000>; the API health check is at <http://localhost:8000/health>.
+The shared API response contract is documented in [`docs/api-contract-v1.md`](docs/api-contract-v1.md)
+and served as JSON Schema at <http://localhost:8000/v1/contracts/study-analysis>.
 
 ## Quality checks
 
