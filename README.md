@@ -56,6 +56,11 @@ upload limits with `RADAR_MAX_DICOM_FILE_BYTES`, `RADAR_MAX_DICOM_SERIES_BYTES`,
 `RADAR_MAX_DICOM_FILES`, and `RADAR_MAX_DICOM_PIXELS` as needed. Do not use patient data.
 The shared API response contract is documented in [`docs/api-contract-v1.md`](docs/api-contract-v1.md)
 and served as JSON Schema at <http://localhost:8000/v1/contracts/study-analysis>.
+The web app lists saved studies, uploads anonymized DICOM series, and displays CT slice previews
+from the private API. Configure `RADAR_WEB_ORIGINS` for the local web origin when it differs from
+the defaults. Reviewer decisions are stored in an append-only event table; the current prototype
+uses a shared `local-reviewer` identity and does not provide authentication. The API does not yet
+have a validated CT inference runner, so uploaded studies remain awaiting analysis.
 
 ## Quality checks
 

@@ -5,7 +5,6 @@ import { usePathname } from "next/navigation";
 
 const NAV_ITEMS = [
   { href: "/", label: "Triage Dashboard" },
-  { href: "/studies/00000000-0000-4000-8000-000000000001", label: "Slice Viewer" },
   { href: "/system", label: "System & Model Status" },
 ];
 
@@ -55,10 +54,8 @@ export function HeaderNav() {
         </nav>
 
         <div className="header-meta">
-          <span className="badge badge-success">
-            <span aria-hidden="true">●</span> muse-spark-1.3
-          </span>
-          <span>Reviewer: Bryan C. Shine</span>
+          <span className="badge badge-neutral">Inference unavailable</span>
+          <span>Research prototype</span>
         </div>
       </div>
     </header>

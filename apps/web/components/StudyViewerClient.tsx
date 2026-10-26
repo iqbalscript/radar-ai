@@ -1,415 +1,112 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
-import type { FindingReviewStatus } from "@radar-ai/contracts";
-import type { DemoStudyEntry } from "@/lib/demo-data";
-import { ReviewStatusBadge, StudyStatusBadge } from "@/components/ClinicalBadge";
-import { EmptyState } from "@/components/states/EmptyState";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { Study, StudyAnalysisResponse, FindingReviewStatus } from "@radar-ai/contracts";
 
-export function StudyViewerClient({ studyEntry }: { studyEntry: DemoStudyEntry }) {
-  const { study, findings, model_version, schema_version } = studyEntry.analysis;
-  const slices = study.slices;
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
-  // Default to the first evidence slice if present, otherwise slice 0
-  const initialSliceIndex = (() => {
-    const firstEvidenceId = findings[0]?.evidence_slice_ids[0];
-    if (!firstEvidenceId) return 0;
-    const foundIdx = slices.findIndex((s) => s.slice_id === firstEvidenceId);
-    return foundIdx >= 0 ? foundIdx : 0;
-  })();
-
-  const [activeSliceIdx, setActiveSliceIdx] = useState<number>(initialSliceIndex);
-  const [showOverlay, setShowOverlay] = useState<boolean>(true);
-  const [reviewStatuses, setReviewStatuses] = useState<Record<string, FindingReviewStatus>>(
-    () =>
-      Object.fromEntries(findings.map((f) => [f.finding_id, f.review_status]))
+export function StudyViewerClient({ studyId }: { studyId: string }) {
+  const [study, setStudy] = useState<Study | null>(null);
+  const [analysis, setAnalysis] = useState<StudyAnalysisResponse | null>(null);
+  const [index, setIndex] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [reviewError, setReviewError] = useState("");
+  const slice = study?.slices[index];
+  const imageUrl = useMemo(
+    () => slice ? `${API_BASE}/v1/studies/${studyId}/slices/${slice.slice_id}/image` : "",
+    [slice, studyId],
   );
 
-  const currentSlice = slices[activeSliceIdx] ?? slices[0];
-  const isEvidenceSlice = findings.some((f) =>
-    f.evidence_slice_ids.includes(currentSlice?.slice_id ?? "")
-  );
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`${API_BASE}/v1/studies/${studyId}`, { cache: "no-store" });
+      if (response.status === 404) throw new Error("Studi tidak ditemukan.");
+      if (!response.ok) throw new Error(`API returned ${response.status}`);
+      const value = (await response.json()) as Study;
+      setStudy(value);
+      setIndex((current) => Math.min(current, Math.max(0, value.slices.length - 1)));
+      const analysisResponse = await fetch(`${API_BASE}/v1/studies/${studyId}/analysis`, { cache: "no-store" });
+      setAnalysis(analysisResponse.ok ? (await analysisResponse.json()) as StudyAnalysisResponse : null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Tidak dapat memuat studi.");
+    } finally {
+      setLoading(false);
+    }
+  }, [studyId]);
 
-  const handleReviewChange = (findingId: string, nextStatus: FindingReviewStatus) => {
-    setReviewStatuses((prev) => ({
-      ...prev,
-      [findingId]: nextStatus,
-    }));
-  };
+  useEffect(() => { void load(); }, [load]);
+
+  async function recordReview(findingId: string, review_status: FindingReviewStatus) {
+    setReviewError("");
+    try {
+      const response = await fetch(`${API_BASE}/v1/studies/${studyId}/findings/${findingId}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ review_status }),
+      });
+      if (!response.ok) throw new Error(`Keputusan reviewer gagal disimpan (HTTP ${response.status}).`);
+      if (!analysis) return;
+      setAnalysis({
+        ...analysis,
+        findings: analysis.findings.map((finding) => finding.finding_id === findingId ? { ...finding, review_status } : finding),
+      });
+    } catch (cause) {
+      setReviewError(cause instanceof Error ? cause.message : "Keputusan reviewer gagal disimpan.");
+    }
+  }
 
   return (
-    <div>
-      {/* Breadcrumb & Header */}
-      <nav aria-label="Breadcrumb" style={{ marginBottom: 12 }}>
-        <Link
-          href="/"
-          style={{
-            color: "var(--accent-primary-hover)",
-            fontSize: "0.85rem",
-            fontWeight: 500,
-          }}
-        >
-          ← Back to Triage Queue
-        </Link>
-      </nav>
-
-      <div className="page-header">
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            <h1 className="page-title" style={{ margin: 0 }}>
-              {studyEntry.code} • {studyEntry.seriesDescription}
-            </h1>
-            <StudyStatusBadge status={study.status} />
-          </div>
-          <p className="page-description" style={{ marginTop: 6 }}>
-            Study UUID: <span className="mono">{study.study_id}</span> • Modality:{" "}
-            <strong>{study.modality}</strong> • Schema: <span className="mono">v{schema_version}</span>
-          </p>
-        </div>
-
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            type="button"
-            className={`btn btn-sm ${showOverlay ? "btn-active" : ""}`}
-            aria-pressed={showOverlay}
-            onClick={() => setShowOverlay((prev) => !prev)}
-          >
-            {showOverlay ? "Hide AI Evidence Overlay" : "Show AI Evidence Overlay"}
-          </button>
-        </div>
-      </div>
-
-      <div className="viewer-layout">
-        {/* Left Column: Axial CT Slice Viewport Skeleton */}
-        <section
-          className="ct-viewport-card"
-          aria-label="Axial Brain CT Slice Viewport Placeholder"
-        >
-          <div className="panel-header" style={{ backgroundColor: "var(--bg-surface)" }}>
-            <span className="panel-title">
-              Axial Viewport Skeleton (Slice {activeSliceIdx + 1} of {slices.length})
-            </span>
-            {isEvidenceSlice ? (
-              <span className="badge badge-danger">
-                ★ Cited Evidence Slice (Z = {currentSlice?.z_position_mm ?? 0} mm)
-              </span>
-            ) : (
-              <span className="badge badge-neutral">
-                Standard Slice (Z = {currentSlice?.z_position_mm ?? 0} mm)
-              </span>
-            )}
-          </div>
-
-          <div className="ct-canvas-placeholder">
-            <div className="ct-hud-overlay" aria-hidden="true">
-              <div className="ct-hud-row">
-                <div>
-                  <div>RADAR AI PROTOTYPE VIEWPORT</div>
-                  <div>MODALITY: {study.modality} (NON-CONTRAST CRANIAL)</div>
-                  <div>WINDOW: BRAIN (W:80 L:40)</div>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div>STUDY: {studyEntry.code}</div>
-                  <div>SLICE IDX: {currentSlice?.index ?? 0}</div>
-                  <div>Z-POS: {currentSlice?.z_position_mm ?? "N/A"} mm</div>
-                </div>
+    <div className="viewer-shell">
+      <nav className="breadcrumbs" aria-label="Breadcrumb"><Link href="/">← Kembali ke daftar studi</Link></nav>
+      {loading && <p role="status">Memuat studi…</p>}
+      {error && <div className="notice notice-error" role="alert">{error}<button className="button-secondary" onClick={() => void load()}>Coba lagi</button></div>}
+      {study && (
+        <>
+          <header className="viewer-heading">
+            <div><p className="eyebrow">ANONYMIZED CT STUDY</p><h1>Study {study.study_id.slice(0, 8).toUpperCase()}</h1><p>{study.modality} · {study.slices.length} irisan</p></div>
+            <span className={`status-pill status-${study.status}`}>{study.status}</span>
+          </header>
+          <div className="viewer-grid">
+            <section className="image-panel" aria-label="CT slice viewer">
+              <div className="image-toolbar"><span>SLICE {slice ? index + 1 : 0} / {study.slices.length}</span><span>{slice?.z_position_mm == null ? "Z position unavailable" : `Z ${slice.z_position_mm} mm`}</span></div>
+              <div className="image-stage">
+                {slice ? <img src={imageUrl} alt={`Anonymized CT slice ${index + 1} of ${study.slices.length}`} /> : <p>Studi ini belum memiliki irisan.</p>}
               </div>
-
-              <div className="ct-hud-row">
-                <div>ASSET: {currentSlice?.image_asset_id}</div>
-                <div>NOT FOR CLINICAL USE</div>
+              <div className="slice-controls">
+                <button className="button-secondary" type="button" disabled={!slice || index === 0} onClick={() => setIndex((n) => Math.max(0, n - 1))}>Irisan sebelumnya</button>
+                <label htmlFor="slice-index">Irisan <strong>{slice ? index + 1 : 0}</strong> dari {study.slices.length}</label>
+                <button className="button-secondary" type="button" disabled={!slice || index >= study.slices.length - 1} onClick={() => setIndex((n) => Math.min(study.slices.length - 1, n + 1))}>Irisan berikutnya</button>
+                <input id="slice-index" type="range" min={0} max={Math.max(0, study.slices.length - 1)} value={index} disabled={!slice} onChange={(event) => setIndex(Number(event.target.value))} aria-label="Pilih irisan CT" />
               </div>
-            </div>
-
-            {/* Simulated Cranial Axial Contour */}
-            <div className="ct-axial-ring" role="img" aria-label="Simulated axial brain CT contour">
-              {isEvidenceSlice && showOverlay && (
-                <div
-                  className="ct-highlight-marker"
-                  title="Simulated Suspected ICH ROI Candidate"
-                />
-              )}
-              <div
-                style={{
-                  textAlign: "center",
-                  color: "var(--text-muted)",
-                  fontSize: "0.78rem",
-                  padding: 16,
-                }}
-              >
-                <div className="mono" style={{ color: "var(--text-secondary)", fontWeight: 600 }}>
-                  SLICE #{currentSlice?.index ?? 0}
-                </div>
-                <div>Z: {currentSlice?.z_position_mm ?? 0} mm</div>
-                {isEvidenceSlice && showOverlay && (
-                  <div
-                    style={{
-                      marginTop: 8,
-                      color: "var(--status-danger-text)",
-                      fontWeight: 600,
-                    }}
-                  >
-                    [AI ROI Candidate Flagged]
-                  </div>
-                )}
-              </div>
-            </div>
+            </section>
+            <aside className="review-panel">
+              <p className="eyebrow">ANALYSIS & REVIEW</p>
+              <h2>Temuan model</h2>
+              {reviewError && <div className="notice notice-error" role="alert">{reviewError}</div>}
+              {analysis?.findings.length ? analysis.findings.map((finding) => <article className="finding-card" key={finding.finding_id}>
+                <h3>Dugaan perdarahan intrakranial</h3>
+                <p>Skor model: {(finding.confidence * 100).toFixed(0)}% · belum terkalibrasi</p>
+                <p className="finding-evidence">Irisan bukti: {finding.evidence_slice_ids.map((sliceId) => {
+                  const evidenceIndex = study.slices.findIndex((item) => item.slice_id === sliceId);
+                  return <button key={sliceId} type="button" className="evidence-link" onClick={() => evidenceIndex >= 0 && setIndex(evidenceIndex)}>#{evidenceIndex + 1}</button>;
+              })}</p>
+                <label htmlFor={`review-${finding.finding_id}`}>Keputusan reviewer</label>
+                <select id={`review-${finding.finding_id}`} value={finding.review_status} onChange={(event) => void recordReview(finding.finding_id, event.target.value as FindingReviewStatus)}>
+                  <option value="pending" disabled>Menunggu review</option><option value="accepted">Terima</option><option value="rejected">Tolak</option><option value="uncertain">Tidak pasti</option>
+                </select>
+              </article>) : <div className="notice notice-warning" role="status"><strong>{analysis ? "Analisis selesai tanpa temuan." : "Inference belum tersedia."}</strong><br />{analysis ? "Model tidak melaporkan temuan untuk ditinjau." : "Belum ada baseline model yang disiapkan untuk lingkungan ini. Tidak ada temuan yang dibuat atau disimulasikan."}</div>}
+              <p className="muted-copy">Semua skor model bersifat eksperimental dan tidak terkalibrasi. Hasil memerlukan peninjauan manusia.</p>
+              {analysis && <p className="muted-copy">Model: {analysis.model_version.provider} · {analysis.model_version.model_id} · {analysis.model_version.prompt_version}</p>}
+              <dl className="study-metadata"><div><dt>Status pipeline</dt><dd>{study.status}</dd></div><div><dt>Provider</dt><dd>{analysis?.model_version.provider ?? "Belum dikonfigurasi"}</dd></div><div><dt>Review</dt><dd>{analysis?.findings.filter((finding) => finding.review_status === "pending").length ?? 0} menunggu</dd></div></dl>
+            </aside>
           </div>
-
-          {/* Accessible Slice Scrubber */}
-          <div className="slice-scrubber">
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: 12,
-                flexWrap: "wrap",
-              }}
-            >
-              <label htmlFor="slice-range-input" style={{ fontSize: "0.85rem", fontWeight: 600 }}>
-                Scrub Axial Slices (0 – {slices.length - 1}):
-              </label>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  disabled={activeSliceIdx <= 0}
-                  onClick={() => setActiveSliceIdx((i) => Math.max(0, i - 1))}
-                >
-                  ← Prev Slice
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  disabled={activeSliceIdx >= slices.length - 1}
-                  onClick={() => setActiveSliceIdx((i) => Math.min(slices.length - 1, i + 1))}
-                >
-                  Next Slice →
-                </button>
-              </div>
-            </div>
-
-            <input
-              id="slice-range-input"
-              type="range"
-              min={0}
-              max={Math.max(0, slices.length - 1)}
-              value={activeSliceIdx}
-              onChange={(e) => setActiveSliceIdx(Number(e.target.value))}
-              aria-valuemin={0}
-              aria-valuemax={Math.max(0, slices.length - 1)}
-              aria-valuenow={activeSliceIdx}
-              aria-valuetext={`Slice index ${currentSlice?.index ?? 0}, Z position ${
-                currentSlice?.z_position_mm ?? 0
-              } millimeters`}
-              style={{ width: "100%", accentColor: "var(--accent-primary)" }}
-            />
-
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {slices.map((s, idx) => {
-                const cited = findings.some((f) => f.evidence_slice_ids.includes(s.slice_id));
-                return (
-                  <button
-                    key={s.slice_id}
-                    type="button"
-                    onClick={() => setActiveSliceIdx(idx)}
-                    className={`btn btn-sm ${idx === activeSliceIdx ? "btn-active" : ""}`}
-                    aria-label={`Jump to slice ${s.index} (${s.z_position_mm} mm)${
-                      cited ? ", cited as evidence" : ""
-                    }`}
-                  >
-                    Slice {s.index} ({s.z_position_mm}mm) {cited ? "★" : ""}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </section>
-
-        {/* Right Column: Findings & Human Review Panel */}
-        <aside aria-label="AI Findings and Clinician Verification Panel">
-          <div className="panel-card">
-            <div className="panel-header">
-              <h2 className="panel-title">AI Findings &amp; Human Review</h2>
-              <span className="badge badge-neutral mono">{findings.length} finding(s)</span>
-            </div>
-
-            <div style={{ padding: 20 }}>
-              <p
-                style={{
-                  margin: "0 0 16px 0",
-                  fontSize: "0.82rem",
-                  color: "var(--text-secondary)",
-                }}
-              >
-                <strong>Note:</strong> Confidence is an uncalibrated model score in{" "}
-                <span className="mono">[0, 1]</span>. Every finding requires explicit clinician
-                review.
-              </p>
-
-              {findings.length === 0 ? (
-                <EmptyState
-                  title="No Suspected ICH Flagged"
-                  description="The model reported zero findings for this study. Human inspection of all slices is still required."
-                />
-              ) : (
-                findings.map((finding) => {
-                  const currentReview =
-                    reviewStatuses[finding.finding_id] ?? finding.review_status;
-
-                  return (
-                    <div
-                      key={finding.finding_id}
-                      style={{
-                        border: "1px solid var(--border-strong)",
-                        borderRadius: "var(--radius-sm)",
-                        padding: 16,
-                        marginBottom: 16,
-                        backgroundColor: "rgba(30, 41, 59, 0.4)",
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                          gap: 8,
-                          marginBottom: 10,
-                          flexWrap: "wrap",
-                        }}
-                      >
-                        <span className="badge badge-danger">
-                          suspected_intracranial_hemorrhage
-                        </span>
-                        <ReviewStatusBadge status={currentReview} />
-                      </div>
-
-                      <div style={{ fontSize: "0.85rem", marginBottom: 12 }}>
-                        <div>
-                          <strong>Model Score:</strong>{" "}
-                          <span className="mono">{(finding.confidence * 100).toFixed(1)}%</span> (
-                          {finding.confidence})
-                        </div>
-                        <div style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>
-                          Finding ID: <span className="mono">{finding.finding_id}</span>
-                        </div>
-                      </div>
-
-                      <div style={{ marginBottom: 14 }}>
-                        <div
-                          style={{
-                            fontSize: "0.78rem",
-                            fontWeight: 600,
-                            color: "var(--text-secondary)",
-                            marginBottom: 6,
-                          }}
-                        >
-                          Cited Evidence Slices ({finding.evidence_slice_ids.length}):
-                        </div>
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {finding.evidence_slice_ids.map((sliceId) => {
-                            const targetIdx = slices.findIndex((s) => s.slice_id === sliceId);
-                            const targetSlice = slices[targetIdx];
-                            return (
-                              <button
-                                key={sliceId}
-                                type="button"
-                                className="btn btn-sm"
-                                onClick={() => {
-                                  if (targetIdx >= 0) setActiveSliceIdx(targetIdx);
-                                }}
-                              >
-                                Jump to Slice #{targetSlice?.index ?? "?"} (Z=
-                                {targetSlice?.z_position_mm ?? "?"}mm)
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Clinician Action Controls */}
-                      <fieldset
-                        style={{
-                          border: "1px solid var(--border-subtle)",
-                          borderRadius: "var(--radius-sm)",
-                          padding: "10px 12px",
-                          margin: 0,
-                        }}
-                      >
-                        <legend
-                          style={{
-                            fontSize: "0.76rem",
-                            fontWeight: 600,
-                            color: "var(--text-secondary)",
-                            padding: "0 6px",
-                          }}
-                        >
-                          Set Clinician Review Status
-                        </legend>
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {(["accepted", "rejected", "uncertain", "pending"] as const).map(
-                            (statusOption) => (
-                              <button
-                                key={statusOption}
-                                type="button"
-                                className={`btn btn-sm ${
-                                  currentReview === statusOption ? "btn-active" : ""
-                                }`}
-                                aria-pressed={currentReview === statusOption}
-                                onClick={() =>
-                                  handleReviewChange(finding.finding_id, statusOption)
-                                }
-                              >
-                                {statusOption.charAt(0).toUpperCase() + statusOption.slice(1)}
-                              </button>
-                            )
-                          )}
-                        </div>
-                      </fieldset>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
-
-          {/* Model Provenance Card */}
-          <div className="panel-card">
-            <div className="panel-header">
-              <h2 className="panel-title">Model Provenance (RDA-18 Contract)</h2>
-            </div>
-            <div style={{ padding: 20, fontSize: "0.84rem" }}>
-              <dl
-                style={{
-                  margin: 0,
-                  display: "grid",
-                  gridTemplateColumns: "130px 1fr",
-                  rowGap: 8,
-                }}
-              >
-                <dt style={{ color: "var(--text-muted)" }}>Provider:</dt>
-                <dd className="mono" style={{ margin: 0 }}>
-                  {model_version.provider}
-                </dd>
-                <dt style={{ color: "var(--text-muted)" }}>Model ID:</dt>
-                <dd className="mono" style={{ margin: 0 }}>
-                  {model_version.model_id}
-                </dd>
-                <dt style={{ color: "var(--text-muted)" }}>Prompt Version:</dt>
-                <dd className="mono" style={{ margin: 0 }}>
-                  {model_version.prompt_version}
-                </dd>
-                <dt style={{ color: "var(--text-muted)" }}>Version UUID:</dt>
-                <dd className="mono" style={{ margin: 0, wordBreak: "break-all" }}>
-                  {model_version.model_version_id}
-                </dd>
-              </dl>
-            </div>
-          </div>
-        </aside>
-      </div>
+        </>
+      )}
+      <p className="research-note">Riset saja, bukan untuk penggunaan klinis. Tinjau seluruh irisan secara mandiri.</p>
     </div>
   );
 }

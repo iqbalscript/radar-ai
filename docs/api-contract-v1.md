@@ -57,6 +57,20 @@ The API stores opaque study and slice UUIDs only. It does not accept patient nam
 DICOM UIDs, or image bytes. The dependent upload workstream handles DICOM validation and private
 image storage. OpenAPI exposes the route and request/response schemas at `/openapi.json`.
 
+`GET /v1/studies/{study_id}/slices/{slice_id}/image` renders a validated stored slice to a
+windowed PNG preview and sends `Cache-Control: private, no-store`. The preview route is intended
+for the local research UI; this prototype does not authenticate callers, so do not expose the API
+to an untrusted network.
+
+`GET /v1/studies/{study_id}/analysis` returns persisted findings in the v1 contract, or `404` if
+the study has no completed analysis. It never generates a placeholder finding. Review decisions
+are submitted through `POST /v1/studies/{study_id}/findings/{finding_id}/review` with
+`{"review_status":"accepted"}`, `rejected`, or `uncertain`. Each decision is stored in
+`finding_review_events` and can be read from the corresponding `/reviews` route. Reviewer identity
+is currently the fixed local value `local-reviewer`; a real multi-user audit trail requires
+authentication before deployment. Each audit event stores both the previous and newly selected
+review status.
+
 ### Upload one anonymized CT series
 
 `POST /v1/studies/{study_id}/dicom` accepts repeated multipart `files` fields and returns the
