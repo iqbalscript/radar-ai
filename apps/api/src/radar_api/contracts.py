@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class ContractModel(BaseModel):
     """Reject unknown fields so API drift is visible during development."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
 
 class StudyStatus(StrEnum):
@@ -39,6 +39,12 @@ class Study(ContractModel):
     modality: Literal["CT"]
     status: StudyStatus
     slices: list[StudySlice]
+
+
+class CreateStudyRequest(ContractModel):
+    """Create metadata for a study before image upload is handled by its workstream."""
+
+    modality: Literal["CT"] = "CT"
 
 
 class ModelVersion(ContractModel):

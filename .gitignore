@@ -9,7 +9,6 @@ node_modules/
 .next/
 out/
 npm-debug.log*
-*.tsbuildinfo
 
 # Python
 __pycache__/
@@ -19,6 +18,7 @@ venv/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+apps/api/radar.db
 
 # Editors and operating systems
 .vscode/

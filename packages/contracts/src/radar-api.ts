@@ -17,6 +17,10 @@ export interface Study {
   slices: StudySlice[];
 }
 
+export interface CreateStudyRequest {
+  modality?: "CT";
+}
+
 export interface ModelVersion {
   model_version_id: string;
   provider: "meta_model_api" | "approved_alternate" | "demo_fixture";

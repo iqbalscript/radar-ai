@@ -39,10 +39,17 @@ packages/
    .venv\Scripts\Activate.ps1
    python -m pip install -r requirements.txt
    $env:PYTHONPATH = "src"
+   python -m alembic upgrade head
    uvicorn radar_api.main:app --reload --port 8000
    ```
 
 The web app runs at <http://localhost:3000>; the API health check is at <http://localhost:8000/health>.
+The API uses a local SQLite database by default. Set `DATABASE_URL` to a PostgreSQL SQLAlchemy URL
+before running Alembic and the API to use PostgreSQL, for example
+`postgresql+psycopg://radar:radar@localhost:5432/radar`. Do not use real patient data.
+Study metadata is available at `GET /v1/studies` and `GET /v1/studies/{study_id}`; create an empty
+CT study record with `POST /v1/studies` and `{}`. DICOM ingestion and image storage are handled by
+the dependent upload workstream.
 The shared API response contract is documented in [`docs/api-contract-v1.md`](docs/api-contract-v1.md)
 and served as JSON Schema at <http://localhost:8000/v1/contracts/study-analysis>.
 
@@ -71,6 +78,6 @@ GitHub Actions runs these checks for pull requests and pushes to `main`. CI does
 
 ## Scope and safety
 
-The RSNA Brain CT Hemorrhage dataset licensing assessment, source metadata manifest, and outstanding local profiling dependency are documented in [`docs/rsna-ich-licensing-and-profile.md`](docs/rsna-ich-licensing-and-profile.md) and [`docs/rsna-ich-source-manifest.json`](docs/rsna-ich-source-manifest.json). Dataset files and patient-level metadata must remain outside this repository.
-
 The project is an early research/demo prototype. Model outputs are experimental, require human review, and must not be used to diagnose, triage, or make treatment decisions. Follow the data license and privacy requirements before using any dataset.
+
+The RSNA Brain CT Hemorrhage dataset licensing assessment, source metadata manifest, and outstanding local profiling dependency are documented in [`docs/rsna-ich-licensing-and-profile.md`](docs/rsna-ich-licensing-and-profile.md) and [`docs/rsna-ich-source-manifest.json`](docs/rsna-ich-source-manifest.json). Dataset files and patient-level metadata must remain outside this repository.
