@@ -9,6 +9,7 @@ node_modules/
 .next/
 out/
 npm-debug.log*
+*.tsbuildinfo
 
 # Python
 __pycache__/
