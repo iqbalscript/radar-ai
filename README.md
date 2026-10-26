@@ -71,4 +71,6 @@ GitHub Actions runs these checks for pull requests and pushes to `main`. CI does
 
 ## Scope and safety
 
+The RSNA Brain CT Hemorrhage dataset licensing assessment, source metadata manifest, and outstanding local profiling dependency are documented in [`docs/rsna-ich-licensing-and-profile.md`](docs/rsna-ich-licensing-and-profile.md) and [`docs/rsna-ich-source-manifest.json`](docs/rsna-ich-source-manifest.json). Dataset files and patient-level metadata must remain outside this repository.
+
 The project is an early research/demo prototype. Model outputs are experimental, require human review, and must not be used to diagnose, triage, or make treatment decisions. Follow the data license and privacy requirements before using any dataset.
