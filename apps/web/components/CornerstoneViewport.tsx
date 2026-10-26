@@ -87,14 +87,14 @@ async function parseDicomFromImageId(imageId: string): Promise<ParsedDicomSlice>
   const sliceLocation = parseFloat(dataSet.string("x00201041") ?? "0");
 
   const spacingStr = dataSet.string("x00280030") ?? "0.9375\\0.9375";
-  const spacingParts = spacingStr.split("\\").map((v) => parseFloat(v));
+  const spacingParts = spacingStr.split("\\").map((v: string) => parseFloat(v));
   const pixelSpacing: [number, number] = [
     spacingParts[0] || 0.9375,
     spacingParts[1] || 0.9375,
   ];
 
   const posStr = dataSet.string("x00200032") ?? `-120\\-120\\${sliceLocation}`;
-  const imagePositionPatient = posStr.split("\\").map((v) => parseFloat(v) || 0) as [
+  const imagePositionPatient = posStr.split("\\").map((v: string) => parseFloat(v) || 0) as [
     number,
     number,
     number,
