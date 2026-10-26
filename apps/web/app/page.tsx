@@ -21,7 +21,7 @@ export default function DashboardPage() {
 
   const totalStudies = DEMO_STUDIES.length;
   const flaggedStudiesCount = DEMO_STUDIES.filter(
-    (s) => s.analysis.findings.length > 0
+    (s) => s.analysis.findings.length > 0 
   ).length;
   const pendingReviewCount = DEMO_STUDIES.filter((s) =>
     s.analysis.findings.some((f) => f.review_status === "pending")
