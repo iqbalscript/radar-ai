@@ -46,6 +46,17 @@ must cite one or more evidence slices and is `pending` human review by default. 
 contains opaque internal UUIDs and intentionally has no patient name, date of birth, or DICOM UID.
 Unknown fields are rejected by the API models so incompatible changes surface during development.
 
+## Study metadata endpoints
+
+- `POST /v1/studies` accepts `CreateStudyRequest` (`{}` or `{"modality":"CT"}`) and returns a
+  new `Study` with status `uploaded` and no slices yet.
+- `GET /v1/studies` returns the saved studies as a JSON array of `Study` values.
+- `GET /v1/studies/{study_id}` returns one `Study` or `404` when it does not exist.
+
+The API stores opaque study and slice UUIDs only. It does not accept patient names, dates of birth,
+DICOM UIDs, or image bytes. The dependent upload workstream handles DICOM validation and private
+image storage. OpenAPI exposes the route and request/response schemas at `/openapi.json`.
+
 ## Meta model access check
 
 Meta's current Model API documents `https://api.meta.ai/v1`, bearer authentication using
