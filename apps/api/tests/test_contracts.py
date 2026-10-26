@@ -1,26 +1,25 @@
-from uuid import UUID
+import uuid
 
+import pydantic
 import pytest
-from pydantic import ValidationError
 
-from radar_api.contracts import Finding, ModelVersion, Study, StudyAnalysisResponse, StudySlice
+import radar_api.contracts
 
-
-STUDY_ID = UUID("00000000-0000-4000-8000-000000000001")
-SLICE_ID = UUID("00000000-0000-4000-8000-000000000002")
-IMAGE_ID = UUID("00000000-0000-4000-8000-000000000003")
-MODEL_VERSION_ID = UUID("00000000-0000-4000-8000-000000000004")
-FINDING_ID = UUID("00000000-0000-4000-8000-000000000005")
+STUDY_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
+SLICE_ID = uuid.UUID("00000000-0000-4000-8000-000000000002")
+IMAGE_ID = uuid.UUID("00000000-0000-4000-8000-000000000003")
+MODEL_VERSION_ID = uuid.UUID("00000000-0000-4000-8000-000000000004")
+FINDING_ID = uuid.UUID("00000000-0000-4000-8000-000000000005")
 
 
-def example_response() -> StudyAnalysisResponse:
-    return StudyAnalysisResponse(
-        study=Study(
+def example_response() -> radar_api.contracts.StudyAnalysisResponse:
+    return radar_api.contracts.StudyAnalysisResponse(
+        study=radar_api.contracts.Study(
             study_id=STUDY_ID,
             modality="CT",
             status="ready",
             slices=[
-                StudySlice(
+                radar_api.contracts.StudySlice(
                     slice_id=SLICE_ID,
                     index=0,
                     image_asset_id=IMAGE_ID,
@@ -29,7 +28,7 @@ def example_response() -> StudyAnalysisResponse:
             ],
         ),
         findings=[
-            Finding(
+            radar_api.contracts.Finding(
                 finding_id=FINDING_ID,
                 category="suspected_intracranial_hemorrhage",
                 evidence_slice_ids=[SLICE_ID],
@@ -37,7 +36,7 @@ def example_response() -> StudyAnalysisResponse:
                 model_version_id=MODEL_VERSION_ID,
             )
         ],
-        model_version=ModelVersion(
+        model_version=radar_api.contracts.ModelVersion(
             model_version_id=MODEL_VERSION_ID,
             provider="meta_model_api",
             model_id="muse-spark-1.3",
@@ -58,8 +57,8 @@ def test_study_analysis_contract_serializes_versioned_typed_response() -> None:
 
 @pytest.mark.parametrize("confidence", [-0.01, 1.01])
 def test_finding_rejects_confidence_outside_unit_interval(confidence: float) -> None:
-    with pytest.raises(ValidationError):
-        Finding(
+    with pytest.raises(pydantic.ValidationError):
+        radar_api.contracts.Finding(
             finding_id=FINDING_ID,
             category="suspected_intracranial_hemorrhage",
             evidence_slice_ids=[SLICE_ID],
@@ -69,7 +68,7 @@ def test_finding_rejects_confidence_outside_unit_interval(confidence: float) -> 
 
 
 def test_contract_json_schema_contains_expected_types() -> None:
-    schema = StudyAnalysisResponse.model_json_schema()
+    schema = radar_api.contracts.StudyAnalysisResponse.model_json_schema()
 
     assert "Study" in schema["$defs"]
     assert "StudySlice" in schema["$defs"]
