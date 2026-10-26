@@ -193,6 +193,26 @@ def _metrics(labels: list[int], scores: list[float]) -> dict[str, float | None]:
     }
 
 
+def _best_accuracy_threshold(labels: list[int], scores: list[float]) -> tuple[float, float]:
+    """Select a study-level threshold using validation labels only."""
+    if not labels or len(labels) != len(scores):
+        raise ValueError("Threshold selection needs aligned, non-empty validation scores")
+    candidates = sorted({0.0, 0.5, 1.0, *scores})
+    scored = [
+        (
+            sum(
+                (score >= threshold) == bool(label)
+                for label, score in zip(labels, scores, strict=True)
+            )
+            / len(labels),
+            threshold,
+        )
+        for threshold in candidates
+    ]
+    accuracy, threshold = max(scored, key=lambda pair: (pair[0], -abs(pair[1] - 0.5)))
+    return threshold, accuracy
+
+
 def _iter_model_batches(
     records: list[LabeledSlice],
     *,
@@ -232,7 +252,15 @@ def evaluate(
     batch_size: int,
     device: torch.device,
     seed: int,
-) -> tuple[float, dict[str, float | None], dict[str, float | None], int, dict[str, int]]:
+) -> tuple[
+    float,
+    dict[str, float | None],
+    dict[str, float | None],
+    int,
+    dict[str, int],
+    list[int],
+    list[float],
+]:
     model.eval()
     total_loss = 0.0
     count = 0
@@ -271,6 +299,8 @@ def evaluate(
         _metrics(study_labels, study_scores),
         count,
         dict(decode_errors),
+        study_labels,
+        study_scores,
     )
 
 
@@ -283,11 +313,13 @@ def _train_epoch(
     batch_size: int,
     device: torch.device,
     seed: int,
+    log_every: int = 500,
 ) -> tuple[float, int, dict[str, int]]:
     model.train()
     total_loss = 0.0
     count = 0
     decode_errors: Counter[str] = Counter()
+    batches = 0
     for inputs_cpu, targets_cpu, _ in _iter_model_batches(
         records,
         batch_size=batch_size,
@@ -303,6 +335,18 @@ def _train_epoch(
         optimizer.step()
         total_loss += float(loss.detach()) * len(targets)
         count += len(targets)
+        batches += 1
+        if log_every > 0 and batches % log_every == 0:
+            print(
+                json.dumps(
+                    {
+                        "training_batches": batches,
+                        "decoded_slices": count,
+                        "loss": float(loss.detach()),
+                    }
+                ),
+                flush=True,
+            )
     if not count:
         raise ValueError("No decodable slices were available for training")
     return total_loss / count, count, dict(decode_errors)
@@ -337,11 +381,16 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--validation-fraction", type=float, default=0.15)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--resume-checkpoint", type=Path)
+    parser.add_argument("--log-every", type=int, default=500)
     parser.add_argument("--seed", type=int, default=20261026)
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     args = parser.parse_args()
-    if args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0:
-        parser.error("epochs, batch size, and learning rate must be positive")
+    if args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0 or args.log_every < 0:
+        parser.error(
+            "epochs, batch size, and learning rate must be positive; "
+            "log-every cannot be negative"
+        )
     if args.device == "cuda" and not torch.cuda.is_available():
         parser.error("CUDA was requested, but torch.cuda.is_available() is false")
     device = torch.device(args.device)
@@ -373,6 +422,28 @@ def main() -> int:
         model = densenet121(weights=weights)
         pretrained_sha256 = state_dict_sha256(model.state_dict())
         model.classifier = nn.Linear(model.classifier.in_features, 1)
+        start_epoch = 0
+        best_validation_auc = -1.0
+        best_validation_loss = float("inf")
+        history: list[dict[str, object]] = []
+        if args.resume_checkpoint:
+            resume = torch.load(args.resume_checkpoint, map_location="cpu", weights_only=True)
+            if resume.get("metadata", {}).get("labels") != list(BINARY_LABELS):
+                raise ValueError("Resume checkpoint is not a compatible binary CT checkpoint")
+            model.load_state_dict(resume["state_dict"], strict=True)
+            pretrained_sha256 = resume["metadata"].get("weights_sha256", pretrained_sha256)
+            if args.metrics_output.is_file():
+                previous = json.loads(args.metrics_output.read_text(encoding="utf-8"))
+                history = list(previous.get("epoch_history", []))
+                best_epoch = int(previous.get("best_epoch", len(history)))
+                best_row = next((row for row in history if row.get("epoch") == best_epoch), None)
+                if best_row:
+                    best_validation_auc = float(
+                        best_row["validation_study_metrics"].get("auc") or -1.0
+                    )
+                    best_validation_loss = float(best_row.get("validation_loss", float("inf")))
+                start_epoch = max((int(row.get("epoch", 0)) for row in history), default=0)
+            print(f"Resuming from {args.resume_checkpoint} at epoch {start_epoch + 1}", flush=True)
         model.to(device)
         optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
         criterion = nn.BCEWithLogitsLoss(
@@ -381,10 +452,11 @@ def main() -> int:
 
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.metrics_output.parent.mkdir(parents=True, exist_ok=True)
-        best_validation_auc = -1.0
-        best_validation_loss = float("inf")
-        best_epoch = 0
-        history: list[dict[str, object]] = []
+        best_epoch = (
+            int(best_epoch)
+            if args.resume_checkpoint and args.metrics_output.is_file()
+            else 0
+        )
         for epoch in range(args.epochs):
             train_loss, train_decoded, train_decode_errors = _train_epoch(
                 model,
@@ -393,7 +465,8 @@ def main() -> int:
                 training,
                 batch_size=args.batch_size,
                 device=device,
-                seed=args.seed + epoch,
+                seed=args.seed + start_epoch + epoch,
+                log_every=args.log_every,
             )
             (
                 validation_loss,
@@ -401,6 +474,8 @@ def main() -> int:
                 validation_study,
                 validation_decoded,
                 validation_decode_errors,
+                validation_study_labels,
+                validation_study_scores,
             ) = evaluate(
                 model,
                 validation,
@@ -414,7 +489,7 @@ def main() -> int:
                 rank == best_validation_auc and validation_loss < best_validation_loss
             )
             row = {
-                "epoch": epoch + 1,
+                "epoch": start_epoch + epoch + 1,
                 "train_loss": train_loss,
                 "train_decoded_slices": train_decoded,
                 "train_decode_failures": train_decode_errors,
@@ -429,7 +504,7 @@ def main() -> int:
             if improved:
                 best_validation_auc = rank
                 best_validation_loss = validation_loss
-                best_epoch = epoch + 1
+                best_epoch = start_epoch + epoch + 1
                 metadata = {
                     "schema": CHECKPOINT_SCHEMA,
                     "model_id": "torchvision DenseNet121; ImageNet1K_V1 initialized and fine-tuned",
@@ -453,11 +528,29 @@ def main() -> int:
         model.eval()
 
         (
+            validation_loss,
+            validation_slice_metrics,
+            validation_study_metrics,
+            validation_decoded,
+            validation_decode_errors,
+            validation_study_labels,
+            validation_study_scores,
+        ) = evaluate(
+            model,
+            validation,
+            batch_size=args.batch_size,
+            device=device,
+            seed=args.seed,
+        )
+
+        (
             test_loss,
             test_slice_metrics,
             test_study_metrics,
             test_decoded,
             test_decode_errors,
+            test_study_labels,
+            test_study_scores,
         ) = evaluate(
             model,
             test_records,
@@ -465,6 +558,13 @@ def main() -> int:
             device=device,
             seed=args.seed,
         )
+        threshold, validation_accuracy = _best_accuracy_threshold(
+            validation_study_labels, validation_study_scores
+        )
+        test_accuracy_at_validation_threshold = sum(
+            (score >= threshold) == bool(label)
+            for label, score in zip(test_study_labels, test_study_scores, strict=True)
+        ) / len(test_study_labels)
         results = {
             "scope": "research prototype; NOT FOR CLINICAL USE",
             "device": torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu",
@@ -482,9 +582,19 @@ def main() -> int:
             "train_label_counts": _count_labels(training),
             "validation_label_counts": _count_labels(validation),
             "test_label_counts": _count_labels(test_records),
+            "selected_checkpoint_validation_loss": validation_loss,
+            "selected_checkpoint_validation_decoded_slices": validation_decoded,
+            "selected_checkpoint_validation_decode_failures": validation_decode_errors,
+            "selected_checkpoint_validation_slice_metrics": validation_slice_metrics,
+            "selected_checkpoint_validation_study_metrics": validation_study_metrics,
             "test_loss": test_loss,
             "test_slice_metrics": test_slice_metrics,
             "test_study_metrics_max_slice_score": test_study_metrics,
+            "validation_selected_study_threshold": threshold,
+            "validation_study_accuracy_at_selected_threshold": validation_accuracy,
+            "test_study_accuracy_at_validation_selected_threshold": (
+                test_accuracy_at_validation_threshold
+            ),
             "epoch_history": history,
             "warning": "Scores are experimental and are not clinically validated.",
         }
@@ -499,3 +609,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
