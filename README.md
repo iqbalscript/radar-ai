@@ -48,8 +48,12 @@ The API uses a local SQLite database by default. Set `DATABASE_URL` to a Postgre
 before running Alembic and the API to use PostgreSQL, for example
 `postgresql+psycopg://radar:radar@localhost:5432/radar`. Do not use real patient data.
 Study metadata is available at `GET /v1/studies` and `GET /v1/studies/{study_id}`; create an empty
-CT study record with `POST /v1/studies` and `{}`. DICOM ingestion and image storage are handled by
-the dependent upload workstream.
+CT study record with `POST /v1/studies` and `{}`. Upload an anonymized CT series to
+`POST /v1/studies/{study_id}/dicom` using repeated multipart `files` fields.
+The API stores files under `apps/api/data/private-images` by default, outside the web app's
+static directories. Configure `RADAR_STORAGE_DIR` to select another private directory, and adjust
+upload limits with `RADAR_MAX_DICOM_FILE_BYTES`, `RADAR_MAX_DICOM_SERIES_BYTES`,
+`RADAR_MAX_DICOM_FILES`, and `RADAR_MAX_DICOM_PIXELS` as needed. Do not use patient data.
 The shared API response contract is documented in [`docs/api-contract-v1.md`](docs/api-contract-v1.md)
 and served as JSON Schema at <http://localhost:8000/v1/contracts/study-analysis>.
 
