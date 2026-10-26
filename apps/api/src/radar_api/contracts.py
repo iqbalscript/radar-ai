@@ -1,5 +1,6 @@
 """Versioned API contracts shared with the web client."""
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 from uuid import UUID
@@ -68,3 +69,16 @@ class StudyAnalysisResponse(ContractModel):
     study: Study
     findings: list[Finding]
     model_version: ModelVersion
+
+
+class FindingReviewRequest(ContractModel):
+    review_status: Literal["accepted", "rejected", "uncertain"]
+
+
+class FindingReviewEvent(ContractModel):
+    review_event_id: UUID
+    finding_id: UUID
+    previous_review_status: FindingReviewStatus | None = None
+    review_status: Literal["accepted", "rejected", "uncertain"]
+    reviewer: str
+    created_at: datetime

@@ -1,17 +1,56 @@
-from uuid import UUID
+import os
+from io import BytesIO
+from math import isclose
+from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, status
+import numpy as np
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from PIL import Image
+from pydicom import dcmread
+from pydicom.errors import InvalidDicomError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from radar_api.contracts import CreateStudyRequest, Study, StudyAnalysisResponse
+from radar_api.contracts import (
+    CreateStudyRequest,
+    FindingReviewEvent,
+    FindingReviewRequest,
+    Study,
+    StudyAnalysisResponse,
+)
 from radar_api.database import get_session
-from radar_api.models import StudyRecord
+from radar_api.dicom_upload import UploadLimits, UploadTooLarge, stage_upload
+from radar_api.dicom_validation import DicomValidationError, validate_ct_slice
+from radar_api.models import (
+    ImageAssetRecord,
+    PersistedFindingRecord,
+    ReviewEventRecord,
+    StudyAnalysisRecord,
+    StudyRecord,
+    StudySliceRecord,
+)
+from radar_api.storage import PrivateImageStore
 
 app = FastAPI(
     title="RADAR AI API",
     description="Research prototype API for brain CT review assistance. Not for clinical use.",
     version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip()
+        for origin in os.getenv(
+            "RADAR_WEB_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+        ).split(",")
+        if origin.strip()
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -46,8 +85,10 @@ def create_study(
 def list_studies(session: Session = Depends(get_session)) -> list[StudyRecord]:
     """List study metadata without exposing patient identifiers or image contents."""
 
-    statement = select(StudyRecord).options(selectinload(StudyRecord.slices)).order_by(
-        StudyRecord.created_at.desc(), StudyRecord.study_id
+    statement = (
+        select(StudyRecord)
+        .options(selectinload(StudyRecord.slices))
+        .order_by(StudyRecord.created_at.desc(), StudyRecord.study_id)
     )
     return list(session.scalars(statement).all())
 
@@ -65,3 +106,311 @@ def get_study(study_id: UUID, session: Session = Depends(get_session)) -> StudyR
     if study is None:
         raise HTTPException(status_code=404, detail="Study not found")
     return study
+
+
+@app.get(
+    "/v1/studies/{study_id}/analysis",
+    response_model=StudyAnalysisResponse,
+    tags=["analysis"],
+)
+def get_study_analysis(study_id: UUID, session: Session = Depends(get_session)) -> dict:
+    """Return persisted findings only; this endpoint never fabricates inference output."""
+
+    study = session.scalar(
+        select(StudyRecord)
+        .where(StudyRecord.study_id == study_id)
+        .options(selectinload(StudyRecord.slices))
+    )
+    if study is None:
+        raise HTTPException(status_code=404, detail="Study not found")
+    analysis = session.scalar(
+        select(StudyAnalysisRecord)
+        .where(StudyAnalysisRecord.study_id == study_id)
+        .options(selectinload(StudyAnalysisRecord.model_version))
+        .order_by(StudyAnalysisRecord.created_at.desc(), StudyAnalysisRecord.analysis_id.desc())
+        .limit(1)
+    )
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="No completed model analysis is available")
+    findings = list(
+        session.scalars(
+            select(PersistedFindingRecord)
+            .where(
+                PersistedFindingRecord.study_id == study_id,
+                PersistedFindingRecord.model_version_id == analysis.model_version_id,
+            )
+            .options(
+                selectinload(PersistedFindingRecord.evidence),
+                selectinload(PersistedFindingRecord.model_version),
+            )
+            .order_by(PersistedFindingRecord.finding_id)
+        ).all()
+    )
+    model_version = analysis.model_version
+    if any(not item.evidence for item in findings):
+        raise HTTPException(
+            status_code=409, detail="A finding is missing its required evidence slices"
+        )
+    study_slice_ids = {item.slice_id for item in study.slices}
+    if any(
+        link.slice_id not in study_slice_ids for finding in findings for link in finding.evidence
+    ):
+        raise HTTPException(
+            status_code=409, detail="A finding references a slice outside its study"
+        )
+    return {
+        "schema_version": "1.0.0",
+        "study": study,
+        "findings": [
+            {
+                "finding_id": item.finding_id,
+                "category": item.category,
+                "evidence_slice_ids": [link.slice_id for link in item.evidence],
+                "confidence": item.confidence,
+                "review_status": item.review_status,
+                "model_version_id": item.model_version_id,
+            }
+            for item in findings
+        ],
+        "model_version": model_version,
+    }
+
+
+@app.post(
+    "/v1/studies/{study_id}/findings/{finding_id}/review",
+    response_model=FindingReviewEvent,
+    status_code=status.HTTP_201_CREATED,
+    tags=["review"],
+)
+def review_finding(
+    study_id: UUID,
+    finding_id: UUID,
+    request: FindingReviewRequest,
+    session: Session = Depends(get_session),
+) -> ReviewEventRecord:
+    """Record one local reviewer decision and preserve each decision in the audit log."""
+
+    finding = session.scalar(
+        select(PersistedFindingRecord).where(
+            PersistedFindingRecord.finding_id == finding_id,
+            PersistedFindingRecord.study_id == study_id,
+        )
+    )
+    if finding is None:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    event = ReviewEventRecord(
+        finding_id=finding_id,
+        previous_review_status=finding.review_status,
+        review_status=request.review_status,
+        reviewer="local-reviewer",
+    )
+    finding.review_status = request.review_status
+    session.add(event)
+    session.commit()
+    session.refresh(event)
+    return event
+
+
+@app.get(
+    "/v1/studies/{study_id}/findings/{finding_id}/reviews",
+    response_model=list[FindingReviewEvent],
+    tags=["review"],
+)
+def list_finding_reviews(
+    study_id: UUID,
+    finding_id: UUID,
+    session: Session = Depends(get_session),
+) -> list[ReviewEventRecord]:
+    finding = session.scalar(
+        select(PersistedFindingRecord).where(
+            PersistedFindingRecord.finding_id == finding_id,
+            PersistedFindingRecord.study_id == study_id,
+        )
+    )
+    if finding is None:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    return list(
+        session.scalars(
+            select(ReviewEventRecord)
+            .where(ReviewEventRecord.finding_id == finding_id)
+            .order_by(ReviewEventRecord.created_at, ReviewEventRecord.review_event_id)
+        ).all()
+    )
+
+
+@app.get("/v1/studies/{study_id}/slices/{slice_id}/image", tags=["studies"])
+def get_slice_preview(
+    study_id: UUID,
+    slice_id: UUID,
+    session: Session = Depends(get_session),
+) -> Response:
+    """Render one validated private CT slice as a non-cacheable PNG preview."""
+
+    record = session.scalar(
+        select(StudySliceRecord)
+        .where(
+            StudySliceRecord.study_id == study_id,
+            StudySliceRecord.slice_id == slice_id,
+        )
+        .options(selectinload(StudySliceRecord.image_asset))
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="Study slice not found")
+
+    path = PrivateImageStore().path_for(record.image_asset.storage_key)
+    try:
+        dataset = dcmread(path, force=False)
+        pixels = dataset.pixel_array.astype(np.float32)
+        pixels = pixels * float(getattr(dataset, "RescaleSlope", 1)) + float(
+            getattr(dataset, "RescaleIntercept", 0)
+        )
+        window_width = getattr(dataset, "WindowWidth", 80)
+        window_center = getattr(dataset, "WindowCenter", 40)
+        if not isinstance(window_width, (str, int, float)):
+            window_width = window_width[0]
+        if not isinstance(window_center, (str, int, float)):
+            window_center = window_center[0]
+        width = float(window_width)
+        level = float(window_center)
+        if width <= 0:
+            raise ValueError("Invalid window width")
+        low, high = level - width / 2, level + width / 2
+        pixels = np.clip((pixels - low) / (high - low), 0, 1)
+        if str(getattr(dataset, "PhotometricInterpretation", "")) == "MONOCHROME1":
+            pixels = 1 - pixels
+        image = Image.fromarray((pixels * 255).astype(np.uint8), mode="L")
+        buffer = BytesIO()
+        image.save(buffer, format="PNG", optimize=True)
+    except (
+        InvalidDicomError,
+        OSError,
+        AttributeError,
+        IndexError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+    ) as error:
+        raise HTTPException(
+            status_code=422, detail="Stored CT slice could not be rendered"
+        ) from error
+    return Response(
+        content=buffer.getvalue(),
+        media_type="image/png",
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@app.post(
+    "/v1/studies/{study_id}/dicom",
+    response_model=Study,
+    status_code=status.HTTP_201_CREATED,
+    tags=["studies"],
+)
+async def upload_dicom_series(
+    study_id: UUID,
+    files: list[UploadFile] = File(...),
+    session: Session = Depends(get_session),
+) -> StudyRecord:
+    """Validate and privately store one anonymized, single-frame CT series."""
+
+    limits = UploadLimits.from_environment()
+    if not files:
+        raise HTTPException(status_code=422, detail="At least one DICOM image is required")
+    if len(files) > limits.max_files:
+        raise HTTPException(status_code=413, detail="DICOM series contains too many files")
+
+    study = session.scalar(
+        select(StudyRecord)
+        .where(StudyRecord.study_id == study_id)
+        .options(selectinload(StudyRecord.slices))
+    )
+    if study is None:
+        raise HTTPException(status_code=404, detail="Study not found")
+    if study.slices:
+        raise HTTPException(status_code=409, detail="Study already has an uploaded DICOM series")
+
+    store = PrivateImageStore()
+    staged = []
+    published_keys: list[str] = []
+    try:
+        total_size = 0
+        for upload in files:
+            item = await stage_upload(
+                upload,
+                store,
+                limits,
+                already_staged_bytes=total_size,
+            )
+            staged.append(item)
+            total_size += item.size_bytes
+
+        validated = [validate_ct_slice(item.path, max_pixels=limits.max_pixels) for item in staged]
+        if len({item.study_instance_uid for item in validated}) != 1:
+            raise DicomValidationError("DICOM files do not belong to the same study")
+        if len({item.series_instance_uid for item in validated}) != 1:
+            raise DicomValidationError("DICOM files do not belong to the same CT series")
+        if len({item.sop_instance_uid for item in validated}) != len(validated):
+            raise DicomValidationError("DICOM series contains duplicate image instances")
+        if any(
+            any(
+                not isclose(left, right, abs_tol=1e-4)
+                for left, right in zip(item.orientation, validated[0].orientation, strict=True)
+            )
+            for item in validated[1:]
+        ):
+            raise DicomValidationError("DICOM series image orientations do not match")
+        if len({round(item.slice_position, 4) for item in validated}) != len(validated):
+            raise DicomValidationError("DICOM series contains duplicate slice positions")
+
+        ordered = sorted(
+            zip(staged, validated, strict=True), key=lambda item: item[1].slice_position
+        )
+        for index, (upload, metadata) in enumerate(ordered):
+            asset_id = uuid4()
+            storage_key = store.storage_key(study_id, asset_id)
+            store.publish(upload.path, storage_key)
+            published_keys.append(storage_key)
+            session.add(
+                ImageAssetRecord(
+                    image_asset_id=asset_id,
+                    storage_key=storage_key,
+                    sha256=upload.sha256,
+                    size_bytes=upload.size_bytes,
+                )
+            )
+            study.slices.append(
+                StudySliceRecord(
+                    slice_id=uuid4(),
+                    index=index,
+                    image_asset_id=asset_id,
+                    z_position_mm=metadata.z_position_mm,
+                )
+            )
+
+        session.commit()
+        return study
+    except UploadTooLarge as error:
+        session.rollback()
+        for key in published_keys:
+            store.delete(key)
+        raise HTTPException(status_code=413, detail=str(error)) from error
+    except DicomValidationError as error:
+        session.rollback()
+        for key in published_keys:
+            store.delete(key)
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except ValueError as error:
+        session.rollback()
+        for key in published_keys:
+            store.delete(key)
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except BaseException:
+        session.rollback()
+        for key in published_keys:
+            store.delete(key)
+        raise
+    finally:
+        for item in staged:
+            item.path.unlink(missing_ok=True)
+        for upload in files:
+            await upload.close()

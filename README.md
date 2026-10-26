@@ -48,10 +48,19 @@ The API uses a local SQLite database by default. Set `DATABASE_URL` to a Postgre
 before running Alembic and the API to use PostgreSQL, for example
 `postgresql+psycopg://radar:radar@localhost:5432/radar`. Do not use real patient data.
 Study metadata is available at `GET /v1/studies` and `GET /v1/studies/{study_id}`; create an empty
-CT study record with `POST /v1/studies` and `{}`. DICOM ingestion and image storage are handled by
-the dependent upload workstream.
+CT study record with `POST /v1/studies` and `{}`. Upload an anonymized CT series to
+`POST /v1/studies/{study_id}/dicom` using repeated multipart `files` fields.
+The API stores files under `apps/api/data/private-images` by default, outside the web app's
+static directories. Configure `RADAR_STORAGE_DIR` to select another private directory, and adjust
+upload limits with `RADAR_MAX_DICOM_FILE_BYTES`, `RADAR_MAX_DICOM_SERIES_BYTES`,
+`RADAR_MAX_DICOM_FILES`, and `RADAR_MAX_DICOM_PIXELS` as needed. Do not use patient data.
 The shared API response contract is documented in [`docs/api-contract-v1.md`](docs/api-contract-v1.md)
 and served as JSON Schema at <http://localhost:8000/v1/contracts/study-analysis>.
+The web app lists saved studies, uploads anonymized DICOM series, and displays CT slice previews
+from the private API. Configure `RADAR_WEB_ORIGINS` for the local web origin when it differs from
+the defaults. Reviewer decisions are stored in an append-only event table; the current prototype
+uses a shared `local-reviewer` identity and does not provide authentication. The API does not yet
+have a validated CT inference runner, so uploaded studies remain awaiting analysis.
 
 ## Quality checks
 
@@ -81,3 +90,5 @@ GitHub Actions runs these checks for pull requests and pushes to `main`. CI does
 The project is an early research/demo prototype. Model outputs are experimental, require human review, and must not be used to diagnose, triage, or make treatment decisions. Follow the data license and privacy requirements before using any dataset.
 
 The RSNA Brain CT Hemorrhage dataset licensing assessment, source metadata manifest, and outstanding local profiling dependency are documented in [`docs/rsna-ich-licensing-and-profile.md`](docs/rsna-ich-licensing-and-profile.md) and [`docs/rsna-ich-source-manifest.json`](docs/rsna-ich-source-manifest.json). Dataset files and patient-level metadata must remain outside this repository.
+The Sprint 1 preprocessing, grouped split-manifest, memory budget, and dependent-workstream handoff are documented in [`docs/dicom-preprocessing-handoff.md`](docs/dicom-preprocessing-handoff.md).
+

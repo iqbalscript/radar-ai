@@ -57,6 +57,39 @@ The API stores opaque study and slice UUIDs only. It does not accept patient nam
 DICOM UIDs, or image bytes. The dependent upload workstream handles DICOM validation and private
 image storage. OpenAPI exposes the route and request/response schemas at `/openapi.json`.
 
+`GET /v1/studies/{study_id}/slices/{slice_id}/image` renders a validated stored slice to a
+windowed PNG preview and sends `Cache-Control: private, no-store`. The preview route is intended
+for the local research UI; this prototype does not authenticate callers, so do not expose the API
+to an untrusted network.
+
+`GET /v1/studies/{study_id}/analysis` returns persisted findings in the v1 contract, or `404` if
+the study has no completed analysis. It never generates a placeholder finding. Review decisions
+are submitted through `POST /v1/studies/{study_id}/findings/{finding_id}/review` with
+`{"review_status":"accepted"}`, `rejected`, or `uncertain`. Each decision is stored in
+`finding_review_events` and can be read from the corresponding `/reviews` route. Reviewer identity
+is currently the fixed local value `local-reviewer`; a real multi-user audit trail requires
+authentication before deployment. Each audit event stores both the previous and newly selected
+review status.
+
+### Upload one anonymized CT series
+
+`POST /v1/studies/{study_id}/dicom` accepts repeated multipart `files` fields and returns the
+updated `Study`. The series must contain readable, single-frame CT images with matching study and
+series identifiers, unique SOP instances, valid image geometry, and decodable pixel data. Direct
+patient and institution identifiers are rejected. A study accepts one series; use the study UUID
+returned by `POST /v1/studies`.
+
+Uploads are streamed to a private filesystem directory (default `apps/api/data/private-images` when
+the API is run from `apps/api`). The directory is not mounted as static content. Storage paths use
+server-generated UUIDs; client filenames and content types are ignored. On POSIX systems directories
+are created with mode `0700` and files with mode `0600`. No DICOM tags or storage paths are returned.
+
+Configurable limits are `RADAR_MAX_DICOM_FILE_BYTES` (64 MiB per file),
+`RADAR_MAX_DICOM_SERIES_BYTES` (512 MiB per series), `RADAR_MAX_DICOM_FILES` (512 files), and
+`RADAR_MAX_DICOM_PIXELS` (16,777,216 pixels per image). A size or file-count overflow returns `413`,
+invalid or identifiable DICOM returns `422`, an unknown study returns `404`, and a study that already
+has a series returns `409`.
+
 ## Meta model access check
 
 Meta's current Model API documents `https://api.meta.ai/v1`, bearer authentication using

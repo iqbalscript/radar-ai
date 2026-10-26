@@ -4,35 +4,19 @@ import { DisclaimerBanner } from "@/components/DisclaimerBanner";
 import { HeaderNav } from "@/components/HeaderNav";
 
 export const metadata: Metadata = {
-  title: "RADAR AI — Brain CT Review Research Prototype",
-  description:
-    "Research prototype for brain CT review assistance (Meta Global AI Developer Hackathon 2026). Not for clinical use.",
+  title: "RADAR AI — Brain CT Research Workspace",
+  description: "Research prototype for brain CT review assistance. Not for clinical use.",
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{ children: React.ReactNode }>) {
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="id">
       <body>
-        <a href="#main-content" className="skip-link">
-          Skip to main content
-        </a>
+        <a href="#main-content" className="skip-link">Skip to main content</a>
         <DisclaimerBanner />
         <HeaderNav />
-        <main id="main-content" className="main-container">
-          {children}
-        </main>
-        <footer className="app-footer">
-          <p style={{ margin: "0 0 6px 0" }}>
-            <strong>RADAR AI</strong> • Meta Global AI Developer Hackathon 2026 • Sprint 1 (Epic
-            RDA-4)
-          </p>
-          <p style={{ margin: 0 }} role="note">
-            Research and demonstration prototype only. Not for clinical use. Never commit patient
-            data or credentials.
-          </p>
-        </footer>
+        <main id="main-content" className="main-container">{children}</main>
+        <footer className="app-footer">Research and demonstration prototype only. Not for clinical use.</footer>
       </body>
     </html>
   );
