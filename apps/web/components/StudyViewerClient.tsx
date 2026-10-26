@@ -38,7 +38,38 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
     }
   }, [studyId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    let ignore = false;
+    async function fetchStudy() {
+      try {
+        const response = await fetch(`${API_BASE}/v1/studies/${studyId}`, { cache: "no-store" });
+        if (response.status === 404) throw new Error("Studi tidak ditemukan.");
+        if (!response.ok) throw new Error(`API returned ${response.status}`);
+        const value = (await response.json()) as Study;
+        if (!ignore) {
+          setStudy(value);
+          setIndex((current) => Math.min(current, Math.max(0, value.slices.length - 1)));
+          setError("");
+        }
+        const analysisResponse = await fetch(`${API_BASE}/v1/studies/${studyId}/analysis`, { cache: "no-store" });
+        if (!ignore) {
+          setAnalysis(analysisResponse.ok ? (await analysisResponse.json()) as StudyAnalysisResponse : null);
+        }
+      } catch (cause) {
+        if (!ignore) {
+          setError(cause instanceof Error ? cause.message : "Tidak dapat memuat studi.");
+        }
+      } finally {
+        if (!ignore) {
+          setLoading(false);
+        }
+      }
+    }
+    void fetchStudy();
+    return () => {
+      ignore = true;
+    };
+  }, [studyId]);
 
   async function recordReview(findingId: string, review_status: FindingReviewStatus) {
     setReviewError("");
@@ -74,7 +105,12 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
             <section className="image-panel" aria-label="CT slice viewer">
               <div className="image-toolbar"><span>SLICE {slice ? index + 1 : 0} / {study.slices.length}</span><span>{slice?.z_position_mm == null ? "Z position unavailable" : `Z ${slice.z_position_mm} mm`}</span></div>
               <div className="image-stage">
-                {slice ? <img src={imageUrl} alt={`Anonymized CT slice ${index + 1} of ${study.slices.length}`} /> : <p>Studi ini belum memiliki irisan.</p>}
+                {slice ? (
+                  /* eslint-disable-next-line @next/next/no-img-element */
+                  <img src={imageUrl} alt={`Anonymized CT slice ${index + 1} of ${study.slices.length}`} />
+                ) : (
+                  <p>Studi ini belum memiliki irisan.</p>
+                )}
               </div>
               <div className="slice-controls">
                 <button className="button-secondary" type="button" disabled={!slice || index === 0} onClick={() => setIndex((n) => Math.max(0, n - 1))}>Irisan sebelumnya</button>

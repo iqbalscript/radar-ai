@@ -16,11 +16,11 @@ export default function DashboardPage() {
   const fileInput = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
-    setError("");
     try {
       const response = await fetch(`${API_BASE}/v1/studies`, { cache: "no-store" });
       if (!response.ok) throw new Error(`API returned ${response.status}`);
       setStudies((await response.json()) as Study[]);
+      setError("");
     } catch {
       setError("Tidak dapat menghubungi API. Pastikan layanan berjalan di port 8000.");
     } finally {
@@ -28,7 +28,32 @@ export default function DashboardPage() {
     }
   }, []);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    let ignore = false;
+    async function fetchStudies() {
+      try {
+        const response = await fetch(`${API_BASE}/v1/studies`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`API returned ${response.status}`);
+        const data = (await response.json()) as Study[];
+        if (!ignore) {
+          setStudies(data);
+          setError("");
+        }
+      } catch {
+        if (!ignore) {
+          setError("Tidak dapat menghubungi API. Pastikan layanan berjalan di port 8000.");
+        }
+      } finally {
+        if (!ignore) {
+          setLoading(false);
+        }
+      }
+    }
+    void fetchStudies();
+    return () => {
+      ignore = true;
+    };
+  }, []);
 
   async function uploadSeries(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
