@@ -509,6 +509,11 @@ def main() -> int:
                     "schema": CHECKPOINT_SCHEMA,
                     "model_id": "torchvision DenseNet121; ImageNet1K_V1 initialized and fine-tuned",
                     "training_data": "Brain_CT_data; binary instance labels from bags_train.csv",
+                    "label_source": "RSNA_ICH bags_train.csv instance_label",
+                    "label_semantics": {
+                        "0": "No hemorrhage annotation on this slice",
+                        "1": "Hemorrhage annotated present on this slice",
+                    },
                     "weights_sha256": pretrained_sha256,
                     "labels": list(BINARY_LABELS),
                     "preprocessing": PREPROCESSING,

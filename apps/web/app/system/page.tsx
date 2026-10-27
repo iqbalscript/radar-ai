@@ -32,8 +32,8 @@ export default function SystemStatusPage() {
       </section>
       <section className="queue-panel system-panel">
         <p className="eyebrow">MODEL & CONTRACT</p><h2>Inference lokal per studi</h2>
-        <p className="muted-copy">Viewer meminta skor dari checkpoint DenseNet121 lokal saat studi dibuka. Halaman ini tidak memeriksa checkpoint. Baseline saat ini hanya mengeluarkan skor biner per irisan; arti label 0/1 belum terverifikasi, jadi skor tidak diubah menjadi temuan medis.</p>
-        <dl className="study-metadata"><div><dt>Kontrak API</dt><dd>v1.0.0</dd></div><div><dt>Provider model</dt><dd>Checkpoint lokal, status per lingkungan</dd></div><div><dt>Label checkpoint</dt><dd>Biner 0/1 · arti klinis belum diverifikasi</dd></div><div><dt>Kegunaan</dt><dd>Riset saja</dd></div></dl>
+        <p className="muted-copy">Viewer meminta skor dari checkpoint DenseNet121 lokal saat studi dibuka. Label checkpoint mengikuti anotasi irisan dataset RSNA ICH: 1 berarti hemorrhage dianotasi hadir, 0 berarti tidak ada anotasi positif. Skor tetap eksperimental, tidak terkalibrasi, dan tidak otomatis menjadi diagnosis atau temuan tersimpan.</p>
+        <dl className="study-metadata"><div><dt>Kontrak API</dt><dd>v1.0.0</dd></div><div><dt>Provider model</dt><dd>Checkpoint lokal, status per lingkungan</dd></div><div><dt>Target label</dt><dd>RSNA ICH · anotasi perdarahan per irisan</dd></div><div><dt>Kegunaan</dt><dd>Riset saja</dd></div></dl>
       </section>
     </div>
   );

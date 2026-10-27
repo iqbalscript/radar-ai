@@ -57,8 +57,8 @@ export interface StudyModelScores {
   model_id: string;
   checkpoint_sha256: string;
   device: string;
-  score_semantics: "Uncalibrated binary class scores; not a diagnosis";
-  class_1_label_semantics: "Unspecified by dataset metadata";
+  score_semantics: "Uncalibrated RSNA ICH slice-label scores; not a diagnosis";
+  class_1_label_semantics: "RSNA ICH slice label 1 means hemorrhage annotated present; research score only";
   slices: StudySliceScore[];
 }
 

@@ -88,10 +88,14 @@ When the viewer opens a study, it requests per-slice class scores from the API a
 class-1 slice as navigable evidence. Missing or incompatible checkpoints return an explicit
 unavailable status; the UI does not invent scores.
 
-The source dataset records binary labels `0` and `1`, but its class-1 clinical meaning has not been
-verified. The viewer therefore labels output as a generic, uncalibrated class score and does not
-convert it into a suspected-hemorrhage finding. This result is research-only and not for clinical
-use.
+The local `bags_train.csv` follows the TorchMIL `RSNA_ICH` bag format and provides per-slice
+`instance_label` values. TorchMIL documents this dataset as an adaptation of RSNA Intracranial
+Hemorrhage Detection: `slice_label=1` means the slice contains evidence of hemorrhage, while
+`slice_label=0` is negative. The model's class 1 is therefore mapped to the dataset's positive
+hemorrhage annotation target; it is not a confirmed finding on a newly uploaded scan. Scores remain
+uncalibrated research outputs, are not diagnostic, and are not automatically persisted as findings.
+See the [TorchMIL RSNA dataset documentation](https://torchmil.readthedocs.io/en/main/api/datasets/rsnamil_dataset/)
+and its [CT classification example](https://torchmil.readthedocs.io/en/main/examples/ctscan_classification/).
 
 ## Evidence and dependent-workstream handoff
 
