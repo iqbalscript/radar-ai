@@ -124,16 +124,22 @@ There are 1,000 train bags and 150 test bags. Three patients occur in both offic
 script excludes those three test bags (109 slices) before reporting test metrics. Ten training
 slices failed pixel-data decoding and were counted and skipped; the source files were not changed.
 
-One real local run used one fine-tuning epoch on the RTX 3050, with the ImageNet1K_V1 DenseNet121
-weights and a patient-grouped validation split. On the remaining 5,145 test slices / 147 bags, the
-observed slice AUROC was 0.933 and study-level AUROC using max-slice aggregation was 0.884. Accuracy
-at a fixed 0.5 threshold was 0.760 per slice and 0.497 per study, so that threshold is not suitable
-for study-level decisions. These figures describe this single experiment only; they do not establish
-clinical performance or generalization. A one-slice inference smoke run also loaded this checkpoint
-offline on CUDA and wrote a real model score locally.
+The initial one-epoch RTX 3050 run used the ImageNet1K_V1 DenseNet121 weights and a
+patient-grouped validation split. Its 0.5-threshold study accuracy was 0.497, so fine-tuning was
+continued for two epochs from that checkpoint with a lower learning rate. The best checkpoint was
+epoch 2 by validation study AUROC. On the patient-overlap-purged holdout (5,145 slices / 147 bags),
+it reached study AUROC 0.945. At a fixed 0.5 threshold, study accuracy was 0.701. Selecting a
+threshold of 0.9487 on the validation studies (90.4% validation accuracy) gave 0.864 test study
+accuracy, with 0.743 sensitivity and 0.974 specificity (52 TP, 18 FN, 75 TN, 2 FP). The test set
+was not used to choose the threshold. Slice-level test AUROC was 0.949 and slice accuracy at 0.5
+was 0.883. These are results from one small holdout evaluation, not a guarantee of performance or
+clinical validation. The sensitivity means this operating point missed 18 of 70 positive studies.
+A one-slice inference smoke run also loaded the checkpoint offline on CUDA and wrote a real model
+score locally.
 
 The checkpoint and per-fixture score JSON are in the ignored local `apps/api/data/model-artifacts/`
 folder and must not be committed or shared. This dataset profile is local workspace evidence, not a
 source or licensing determination. Confirm that label `1` has the intended meaning and check the
 dataset's own usage terms before interpreting or sharing results.
+
 
