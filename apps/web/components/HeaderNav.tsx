@@ -54,10 +54,10 @@ export function HeaderNav() {
         </nav>
 
         <div className="header-meta">
-          <span className="badge badge-neutral">Inference unavailable</span>
           <span>Research prototype</span>
         </div>
       </div>
     </header>
   );
 }
+
