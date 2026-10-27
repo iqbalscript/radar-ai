@@ -166,7 +166,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                 <strong>{scoreError ? "Inference belum tersedia." : "Menjalankan inference lokal…"}</strong>
                 {scoreError && <><br />{scoreError}</>}
               </div>}
-              <h3>Temuan tersimpan</h3>
+              <h3>Kandidat model & temuan tersimpan</h3>
               {reviewError && <div className="notice notice-error" role="alert">{reviewError}</div>}
               {analysis?.findings.length ? analysis.findings.map((finding) => <article className="finding-card" key={finding.finding_id}>
                 <h3>Dugaan perdarahan intrakranial</h3>
@@ -179,7 +179,17 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                 <select id={`review-${finding.finding_id}`} value={finding.review_status} onChange={(event) => void recordReview(finding.finding_id, event.target.value as FindingReviewStatus)}>
                   <option value="pending" disabled>Menunggu review</option><option value="accepted">Terima</option><option value="rejected">Tolak</option><option value="uncertain">Tidak pasti</option>
                 </select>
-              </article>) : <div className="notice notice-warning" role="status">{analysis ? "Analisis selesai tanpa temuan tersimpan." : "Belum ada temuan klinis tersimpan. Model saat ini memberi skor per irisan berdasarkan target anotasi dataset; reviewer tetap perlu memeriksa citra."}</div>}
+              </article>) : modelScores ? (() => {
+                const candidate = modelScores.slices.reduce((best, current) =>
+                  current.class_1_score > best.class_1_score ? current : best,
+                );
+                return <article className="finding-card">
+                  <h3>Kandidat skor tertinggi · belum ditinjau</h3>
+                  <p>Skor model untuk label positif ICH: {(candidate.class_1_score * 100).toFixed(1)}% · irisan #{candidate.index + 1}</p>
+                  <button className="evidence-link" type="button" onClick={() => setIndex(candidate.index)}>Buka irisan kandidat</button>
+                  <p className="muted-copy">Diturunkan langsung dari skor inference model untuk target anotasi RSNA ICH. Belum disimpan sebagai temuan dan belum ditinjau reviewer. Skor ini bukan diagnosis atau akurasi model.</p>
+                </article>;
+              })() : <div className="notice notice-warning" role="status">{scoreError ? "Kandidat model belum tersedia karena inference gagal." : "Memuat skor inference untuk menampilkan kandidat model…"}</div>}
               <p className="muted-copy">Semua skor model bersifat eksperimental dan tidak terkalibrasi. Hasil memerlukan peninjauan manusia.</p>
               {analysis && <p className="muted-copy">Model: {analysis.model_version.provider} · {analysis.model_version.model_id} · {analysis.model_version.prompt_version}</p>}
               <dl className="study-metadata"><div><dt>Status pipeline</dt><dd>{study.status}</dd></div><div><dt>Provider</dt><dd>{analysis?.model_version.provider ?? "Belum dikonfigurasi"}</dd></div><div><dt>Review</dt><dd>{analysis?.findings.filter((finding) => finding.review_status === "pending").length ?? 0} menunggu</dd></div></dl>
