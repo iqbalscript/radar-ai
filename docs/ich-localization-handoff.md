@@ -16,6 +16,14 @@ python -m pip install -r requirements.txt
 python scripts/download_samihs_model.py
 ```
 
+For an NVIDIA GPU on Windows, install a CUDA-enabled PyTorch build after the base API requirements.
+The CUDA 13.0 wheel was used with the RTX 3050 in this workspace:
+
+```powershell
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+python -m pip install -r data/model-artifacts/samihs-ich-segmentation/requirements.txt
+```
+
 The downloader fetches the inference wrapper, its minimal SAMIHS source, the published checkpoint,
 and the model package's `requirements.txt`. It never runs training or fine-tuning. The checkpoint
 is about 376 MB and is not committed. Check its requirements before installing them; keep the
@@ -24,7 +32,10 @@ PyTorch/CUDA build compatible with the local GPU. The app's current default mode
 `RADAR_ICH_SEGMENTATION_ROOT` and restart the API after provisioning.
 
 For offline use, complete the one-time package/dependency download before disconnecting. Inference
-then reads the local weights only. On an RTX 3050, begin with
+then reads the local weights only. The upstream package recommends brain CT volumes with about
+16–180 slices; a one-slice upload may validly produce an empty mask because the model lacks the
+volume context typical of its evaluation input. The application shows no box for an empty mask.
+On an RTX 3050, begin with
 `RADAR_ICH_SEGMENTATION_BATCH_SIZE=1`; use `RADAR_ICH_SEGMENTATION_DEVICE=auto` to select CUDA when
 PyTorch reports it available, or set `cpu` explicitly. The default mask cutoff is 0.5 and can be
 changed with `RADAR_ICH_SEGMENTATION_THRESHOLD`.
