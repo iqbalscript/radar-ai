@@ -332,7 +332,9 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                   {largest ? <>
                     <p>Mask menemukan area kandidat pada {candidates.length} irisan. Kotak mengikuti batas area mask irisan, bukan diagnosis.</p>
                     <button className="evidence-link" type="button" onClick={() => setIndex(largest.index)}>Lihat area mask terbesar · irisan #{largest.index + 1}</button>
-                  </> : <p>Model tidak menghasilkan area mask pada seri ini.</p>}
+                  </> : study.slices.length < 16
+                    ? <p>Studi ini hanya berisi {study.slices.length} irisan. Model lokalisasi dirancang untuk volume CT lengkap (sekitar 16–180 irisan); unggah seluruh seri agar model memiliki konteks volume.</p>
+                    : <p>Model tidak menghasilkan area mask pada seri ini pada threshold yang dipilih.</p>}
                   <p className="muted-copy">{localizations.model_id} · {localizations.device} · threshold {localizations.threshold} · checkpoint {localizations.checkpoint_sha256.slice(0, 12)}</p>
                 </article>;
               })() : <div className="notice notice-warning" role="status">
