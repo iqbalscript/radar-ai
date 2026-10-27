@@ -149,7 +149,9 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
             getattr(dataset.file_meta, "MediaStorageSOPClassUID", "")
         ).strip()
         if dataset_sop_class and media_sop_class and dataset_sop_class != media_sop_class:
-            raise DicomValidationError("DICOM file metadata does not match the image")
+            raise DicomValidationError(
+                "DICOM file-meta Media Storage SOP Class UID differs from the image SOP Class UID"
+            )
         sop_class_uid = dataset_sop_class or media_sop_class
         if not sop_class_uid:
             raise DicomValidationError("DICOM file is missing its CT storage class")
@@ -163,21 +165,27 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
         ).strip()
         transfer_syntax = str(getattr(dataset.file_meta, "TransferSyntaxUID", "")).strip()
         dataset_sop_instance = str(getattr(dataset, "SOPInstanceUID", "")).strip()
+        if media_sop_class != sop_class_uid:
+            raise DicomValidationError(
+                "DICOM File Meta is missing or has a different Media Storage SOP Class UID"
+            )
         if (
-            media_sop_class != sop_class_uid
-            or (
-                media_sop_instance
-                and dataset_sop_instance
-                and media_sop_instance != dataset_sop_instance
-            )
-            or any(
-                value and not _is_valid_instance_identifier(value)
-                for value in (media_sop_instance, dataset_sop_instance)
-            )
-            or not transfer_syntax
-            or not UID(transfer_syntax).is_valid
+            media_sop_instance
+            and dataset_sop_instance
+            and media_sop_instance != dataset_sop_instance
         ):
-            raise DicomValidationError("DICOM file metadata does not match the image")
+            raise DicomValidationError(
+                "DICOM File Meta SOP Instance UID differs from the image SOP Instance UID"
+            )
+        if any(
+            value and not _is_valid_instance_identifier(value)
+            for value in (media_sop_instance, dataset_sop_instance)
+        ):
+            raise DicomValidationError("DICOM SOP Instance UID is malformed")
+        if not transfer_syntax or not UID(transfer_syntax).is_valid:
+            raise DicomValidationError(
+                "DICOM File Meta has a missing or invalid Transfer Syntax UID"
+            )
 
         for element in dataset.iterall():
             if element.tag.is_private and _has_value(element.value):

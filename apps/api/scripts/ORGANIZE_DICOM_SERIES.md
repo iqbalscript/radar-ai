@@ -31,5 +31,22 @@ and requires enough free disk space. The program stops without producing output
 when it finds malformed files, mixed or inconsistent series geometry, duplicate
 positions, or an unorderable multi-slice series.
 
+The upload API also checks that the Part 10 File Meta SOP identifiers match the
+identifiers in each DICOM dataset. To make a separate copy that repairs only
+those two File Meta identifiers when they are missing or inconsistent, run:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\organize_dicom_series.py `
+  --input "C:\Users\Iqbal Dovandra\Downloads\radar-private\Brain_CT_data" `
+  --output "C:\Users\Iqbal Dovandra\Downloads\radar-private\Brain_CT_data_sorted_repaired" `
+  --mode copy --repair-file-meta
+```
+
+This option requires copy mode. It leaves the source untouched and does not
+change pixel data or patient metadata. It does not guess a missing or invalid
+Transfer Syntax UID; those files are reported and need to be re-exported or
+repaired with a DICOM-aware tool. Always inspect the dry-run summary before
+creating the output.
+
 This utility organizes files only. It does not train a model, upload images, or
 make clinical predictions.
