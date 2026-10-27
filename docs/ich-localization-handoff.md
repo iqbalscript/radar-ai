@@ -33,8 +33,8 @@ PyTorch/CUDA build compatible with the local GPU. The app's current default mode
 
 For offline use, complete the one-time package/dependency download before disconnecting. Inference
 then reads the local weights only. The upstream package recommends brain CT volumes with about
-16–180 slices; a one-slice upload may validly produce an empty mask because the model lacks the
-volume context typical of its evaluation input. The application shows no box for an empty mask.
+16–180 slices and processes each slice independently. A one-slice upload may validly produce an
+empty mask; the application shows no box for an empty mask.
 On an RTX 3050, begin with
 `RADAR_ICH_SEGMENTATION_BATCH_SIZE=1`; use `RADAR_ICH_SEGMENTATION_DEVICE=auto` to select CUDA when
 PyTorch reports it available, or set `cpu` explicitly. The default mask cutoff is 0.5 and can be
