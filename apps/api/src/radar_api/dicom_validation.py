@@ -93,13 +93,6 @@ CT_STORAGE_CLASSES = {str(CTImageStorage), str(EnhancedCTImageStorage)}
 ANONYMIZED_IDENTIFIER_PATTERN = re.compile(r"ID_[0-9A-Fa-f]{8,12}\Z")
 
 
-def _required_uid(dataset: FileDataset, keyword: str) -> str:
-    value = str(getattr(dataset, keyword, "")).strip()
-    if not value or not UID(value).is_valid:
-        raise DicomValidationError("DICOM series is missing valid required identifiers")
-    return value
-
-
 def _has_value(value: object) -> bool:
     if value is None:
         return False
@@ -151,15 +144,20 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
             raise DicomValidationError("Upload must be a DICOM Part 10 image")
 
         modality = str(getattr(dataset, "Modality", "")).strip().upper()
-        sop_class_uid = _required_uid(dataset, "SOPClassUID")
+        dataset_sop_class = str(getattr(dataset, "SOPClassUID", "")).strip()
+        media_sop_class = str(
+            getattr(dataset.file_meta, "MediaStorageSOPClassUID", "")
+        ).strip()
+        if dataset_sop_class and media_sop_class and dataset_sop_class != media_sop_class:
+            raise DicomValidationError("DICOM file metadata does not match the image")
+        sop_class_uid = dataset_sop_class or media_sop_class
+        if not sop_class_uid:
+            raise DicomValidationError("DICOM file is missing its CT storage class")
         if sop_class_uid not in CT_STORAGE_CLASSES:
             raise DicomValidationError("DICOM object is not a supported CT image")
         if modality and modality != "CT":
             raise DicomValidationError("Only CT images are accepted")
 
-        media_sop_class = str(
-            getattr(dataset.file_meta, "MediaStorageSOPClassUID", "")
-        ).strip()
         media_sop_instance = str(
             getattr(dataset.file_meta, "MediaStorageSOPInstanceUID", "")
         ).strip()
