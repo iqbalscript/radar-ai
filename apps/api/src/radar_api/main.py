@@ -560,41 +560,60 @@ async def upload_dicom_series(
             total_size += item.size_bytes
 
         validated = [validate_ct_slice(item.path, max_pixels=limits.max_pixels) for item in staged]
-        if len(staged) > 1 and any(
-            item.study_instance_uid is None
-            or item.series_instance_uid is None
-            or item.sop_instance_uid is None
-            or item.slice_position is None
-            or item.orientation is None
-            for item in validated
+        for attribute, message in (
+            ("study_instance_uid", "DICOM files do not belong to the same study"),
+            ("series_instance_uid", "DICOM files do not belong to the same CT series"),
         ):
-            raise DicomValidationError(
-                "These CT images lack series identifiers or slice geometry. "
-                "Upload a single image as a one-slice study, or upload a series "
-                "that includes its study, series, and position metadata."
-            )
-        if len({item.study_instance_uid for item in validated}) != 1:
-            raise DicomValidationError("DICOM files do not belong to the same study")
-        if len({item.series_instance_uid for item in validated}) != 1:
-            raise DicomValidationError("DICOM files do not belong to the same CT series")
-        if len({item.sop_instance_uid for item in validated}) != len(validated):
+            identifiers = {getattr(item, attribute) for item in validated} - {None}
+            if len(identifiers) > 1:
+                raise DicomValidationError(message)
+        if len({(item.rows, item.columns) for item in validated}) != 1:
+            raise DicomValidationError("DICOM series image dimensions do not match")
+        if len({item.sha256 for item in staged}) != len(staged):
+            raise DicomValidationError("DICOM series contains duplicate image files")
+        sop_identifiers = [item.sop_instance_uid for item in validated if item.sop_instance_uid]
+        if len(set(sop_identifiers)) != len(sop_identifiers):
             raise DicomValidationError("DICOM series contains duplicate image instances")
-        if any(
-            any(
-                not isclose(left, right, abs_tol=1e-4)
-                for left, right in zip(item.orientation, validated[0].orientation, strict=True)
+
+        has_geometry = [item.slice_position is not None for item in validated]
+        if len(staged) > 1 and any(has_geometry) and not all(has_geometry):
+            raise DicomValidationError(
+                "DICOM series has incomplete slice geometry; include geometry for every slice"
             )
-            for item in validated[1:]
-        ):
-            raise DicomValidationError("DICOM series image orientations do not match")
-        if all(item.slice_position is not None for item in validated) and len(
+        if len(staged) > 1 and not any(has_geometry):
+            instance_numbers = [item.instance_number for item in validated]
+            if any(number is None for number in instance_numbers) or len(
+                set(instance_numbers)
+            ) != len(instance_numbers):
+                raise DicomValidationError(
+                    "Multiple slices need complete position metadata, or a unique "
+                    "DICOM Instance Number on every slice so they can be ordered."
+                )
+        if all(has_geometry):
+            orientations = [item.orientation for item in validated]
+            if any(orientation is None for orientation in orientations):
+                raise DicomValidationError("DICOM series image geometry is incomplete")
+            reference_orientation = orientations[0]
+            if any(
+                any(
+                    not isclose(left, right, abs_tol=1e-4)
+                    for left, right in zip(orientation, reference_orientation, strict=True)
+                )
+                for orientation in orientations[1:]
+            ):
+                raise DicomValidationError("DICOM series image orientations do not match")
+        if all(has_geometry) and len(
             {round(item.slice_position, 4) for item in validated if item.slice_position is not None}
         ) != len(validated):
             raise DicomValidationError("DICOM series contains duplicate slice positions")
 
         ordered = sorted(
             zip(staged, validated, strict=True),
-            key=lambda item: item[1].slice_position if item[1].slice_position is not None else 0.0,
+            key=lambda item: (
+                item[1].slice_position
+                if item[1].slice_position is not None
+                else float(item[1].instance_number or 0)
+            ),
         )
         for index, (upload, metadata) in enumerate(ordered):
             asset_id = uuid4()
