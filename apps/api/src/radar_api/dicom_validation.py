@@ -17,12 +17,12 @@ class DicomValidationError(ValueError):
 
 @dataclass(frozen=True)
 class ValidatedDicom:
-    study_instance_uid: str
-    series_instance_uid: str
-    sop_instance_uid: str
-    slice_position: float
-    z_position_mm: float
-    orientation: tuple[float, ...]
+    study_instance_uid: str | None
+    series_instance_uid: str | None
+    sop_instance_uid: str | None
+    slice_position: float | None
+    z_position_mm: float | None
+    orientation: tuple[float, ...] | None
 
 
 IDENTIFYING_KEYWORDS = frozenset(
@@ -118,11 +118,12 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
         if not isinstance(dataset, FileDataset) or not dataset.file_meta:
             raise DicomValidationError("Upload must be a DICOM Part 10 image")
 
-        if str(getattr(dataset, "Modality", "")).strip().upper() != "CT":
-            raise DicomValidationError("Only CT images are accepted")
+        modality = str(getattr(dataset, "Modality", "")).strip().upper()
         sop_class_uid = _required_uid(dataset, "SOPClassUID")
         if sop_class_uid not in CT_STORAGE_CLASSES:
             raise DicomValidationError("DICOM object is not a supported CT image")
+        if modality and modality != "CT":
+            raise DicomValidationError("Only CT images are accepted")
 
         media_sop_class = str(
             getattr(dataset.file_meta, "MediaStorageSOPClassUID", "")
@@ -131,9 +132,18 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
             getattr(dataset.file_meta, "MediaStorageSOPInstanceUID", "")
         ).strip()
         transfer_syntax = str(getattr(dataset.file_meta, "TransferSyntaxUID", "")).strip()
+        dataset_sop_instance = str(getattr(dataset, "SOPInstanceUID", "")).strip()
         if (
             media_sop_class != sop_class_uid
-            or media_sop_instance != _required_uid(dataset, "SOPInstanceUID")
+            or (
+                media_sop_instance
+                and dataset_sop_instance
+                and media_sop_instance != dataset_sop_instance
+            )
+            or any(
+                value and not UID(value).is_valid
+                for value in (media_sop_instance, dataset_sop_instance)
+            )
             or not transfer_syntax
             or not UID(transfer_syntax).is_valid
         ):
@@ -153,9 +163,17 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
         ):
             raise DicomValidationError("DICOM de-identification metadata is not valid")
 
-        study_uid = _required_uid(dataset, "StudyInstanceUID")
-        series_uid = _required_uid(dataset, "SeriesInstanceUID")
-        sop_uid = _required_uid(dataset, "SOPInstanceUID")
+        study_uid = str(getattr(dataset, "StudyInstanceUID", "")).strip()
+        series_uid = str(getattr(dataset, "SeriesInstanceUID", "")).strip()
+        sop_uid = dataset_sop_instance or media_sop_instance
+        if bool(study_uid) != bool(series_uid):
+            raise DicomValidationError("DICOM series identifiers are incomplete")
+        for value in (study_uid, series_uid, sop_uid):
+            if value and not UID(value).is_valid:
+                raise DicomValidationError("DICOM series identifiers are invalid")
+        study_uid = study_uid or None
+        series_uid = series_uid or None
+        sop_uid = sop_uid or None
         rows, columns = int(dataset.Rows), int(dataset.Columns)
         if rows <= 0 or columns <= 0 or rows * columns > max_pixels:
             raise DicomValidationError("DICOM image dimensions exceed the supported limit")
@@ -173,14 +191,25 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
         if not isinstance(pixels, np.ndarray) or pixels.shape != (rows, columns):
             raise DicomValidationError("DICOM pixel data is incomplete or invalid")
 
-        position, normal, orientation = _position_and_normal(dataset)
-        slice_position = sum(value * axis for value, axis in zip(position, normal))
+        has_position = "ImagePositionPatient" in dataset
+        has_orientation = "ImageOrientationPatient" in dataset
+        if has_position != has_orientation:
+            raise DicomValidationError("DICOM image geometry is incomplete")
+        if has_position:
+            position, normal, orientation = _position_and_normal(dataset)
+            slice_position = sum(value * axis for value, axis in zip(position, normal))
+            z_position_mm = position[2]
+        else:
+            position = None
+            orientation = None
+            slice_position = None
+            z_position_mm = None
         return ValidatedDicom(
             study_instance_uid=study_uid,
             series_instance_uid=series_uid,
             sop_instance_uid=sop_uid,
             slice_position=slice_position,
-            z_position_mm=position[2],
+            z_position_mm=z_position_mm,
             orientation=orientation,
         )
     except DicomValidationError:
@@ -197,4 +226,5 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
         RuntimeError,
     ) as error:
         raise DicomValidationError("DICOM file is corrupted or cannot be decoded") from error
+
 
