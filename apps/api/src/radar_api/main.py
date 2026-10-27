@@ -1,4 +1,3 @@
-import os
 from io import BytesIO
 from math import isclose
 from uuid import UUID, uuid4
@@ -44,7 +43,17 @@ from radar_api.models import (
     StudyRecord,
     StudySliceRecord,
 )
+from radar_api.security import (
+    Principal,
+    SecurityAndRateLimitMiddleware,
+    allowed_web_origins,
+    is_auth_required,
+    require_authenticated_principal,
+)
 from radar_api.storage import PrivateImageStore
+
+# Guard against Pillow decompression bombs on malformed images.
+Image.MAX_IMAGE_PIXELS = 16_777_216
 
 app = FastAPI(
     title="RADAR AI API",
@@ -52,24 +61,48 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.add_middleware(SecurityAndRateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        origin.strip()
-        for origin in os.getenv(
-            "RADAR_WEB_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
-        ).split(",")
-        if origin.strip()
-    ],
+    allow_origins=allowed_web_origins(),
     allow_credentials=False,
     allow_methods=["DELETE", "GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-API-Key",
+        "X-Request-ID",
+        "X-Requested-With",
+    ],
+    expose_headers=[
+        "X-Request-ID",
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-RateLimit-Reset",
+        "Retry-After",
+    ],
 )
 
 
 @app.get("/health", tags=["operations"])
 def health_check() -> dict[str, str]:
     return {"status": "ok", "environment": "research-prototype"}
+
+
+@app.get("/v1/auth/me", tags=["security"])
+def current_principal(
+    principal: Principal = Depends(require_authenticated_principal),
+) -> dict[str, object]:
+    """Return the authenticated caller identity and active security enforcement mode."""
+
+    return {
+        "authenticated": principal.auth_method != "local_dev",
+        "auth_required": is_auth_required(),
+        "auth_method": principal.auth_method,
+        "subject": principal.subject,
+        "reviewer_id": principal.reviewer_id,
+        "email": principal.email,
+    }
 
 
 @app.get("/v1/contracts/study-analysis", tags=["contracts"])
@@ -83,7 +116,9 @@ def study_analysis_contract() -> dict[str, object]:
     "/v1/studies", response_model=Study, status_code=status.HTTP_201_CREATED, tags=["studies"]
 )
 def create_study(
-    request: CreateStudyRequest, session: Session = Depends(get_session)
+    request: CreateStudyRequest,
+    session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
 ) -> StudyRecord:
     """Create an empty CT study record; DICOM upload is handled by a separate workstream."""
 
@@ -95,7 +130,10 @@ def create_study(
 
 
 @app.get("/v1/studies", response_model=list[Study], tags=["studies"])
-def list_studies(session: Session = Depends(get_session)) -> list[StudyRecord]:
+def list_studies(
+    session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
+) -> list[StudyRecord]:
     """List study metadata without exposing patient identifiers or image contents."""
 
     statement = (
@@ -107,7 +145,11 @@ def list_studies(session: Session = Depends(get_session)) -> list[StudyRecord]:
 
 
 @app.get("/v1/studies/{study_id}", response_model=Study, tags=["studies"])
-def get_study(study_id: UUID, session: Session = Depends(get_session)) -> StudyRecord:
+def get_study(
+    study_id: UUID,
+    session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
+) -> StudyRecord:
     """Fetch one study and its ordered slice metadata."""
 
     statement = (
@@ -122,7 +164,11 @@ def get_study(study_id: UUID, session: Session = Depends(get_session)) -> StudyR
 
 
 @app.delete("/v1/studies/{study_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["studies"])
-def delete_empty_study(study_id: UUID, session: Session = Depends(get_session)) -> Response:
+def delete_empty_study(
+    study_id: UUID,
+    session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
+) -> Response:
     """Remove only an empty study record created by an upload that did not complete."""
 
     study = session.scalar(
@@ -147,7 +193,11 @@ def delete_empty_study(study_id: UUID, session: Session = Depends(get_session)) 
     response_model=StudyAnalysisResponse,
     tags=["analysis"],
 )
-def get_study_analysis(study_id: UUID, session: Session = Depends(get_session)) -> dict:
+def get_study_analysis(
+    study_id: UUID,
+    session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
+) -> dict:
     """Return persisted findings only; this endpoint never fabricates inference output."""
 
     study = session.scalar(
@@ -218,6 +268,7 @@ def get_study_analysis(study_id: UUID, session: Session = Depends(get_session)) 
 def get_study_model_scores(
     study_id: UUID,
     session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
 ) -> dict[str, object]:
     """Run the configured local binary checkpoint and return uncalibrated slice scores."""
 
@@ -281,6 +332,7 @@ def get_study_model_scores(
 def get_study_localizations(
     study_id: UUID,
     session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
 ) -> dict[str, object]:
     """Return real bounding boxes derived from the configured pretrained ICH mask model."""
     study = session.scalar(
@@ -346,8 +398,9 @@ def review_finding(
     finding_id: UUID,
     request: FindingReviewRequest,
     session: Session = Depends(get_session),
+    principal: Principal = Depends(require_authenticated_principal),
 ) -> ReviewEventRecord:
-    """Record one local reviewer decision and preserve each decision in the audit log."""
+    """Record one reviewer decision and preserve each decision in the audit log."""
 
     finding = session.scalar(
         select(PersistedFindingRecord).where(
@@ -361,7 +414,7 @@ def review_finding(
         finding_id=finding_id,
         previous_review_status=finding.review_status,
         review_status=request.review_status,
-        reviewer="local-reviewer",
+        reviewer=principal.reviewer_id,
     )
     finding.review_status = request.review_status
     session.add(event)
@@ -379,6 +432,7 @@ def list_finding_reviews(
     study_id: UUID,
     finding_id: UUID,
     session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
 ) -> list[ReviewEventRecord]:
     finding = session.scalar(
         select(PersistedFindingRecord).where(
@@ -402,6 +456,7 @@ def get_slice_preview(
     study_id: UUID,
     slice_id: UUID,
     session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
 ) -> Response:
     """Render one validated private CT slice as a non-cacheable PNG preview."""
 
@@ -469,6 +524,7 @@ async def upload_dicom_series(
     study_id: UUID,
     files: list[UploadFile] = File(...),
     session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
 ) -> StudyRecord:
     """Validate and privately store one anonymized, single-frame CT series."""
 

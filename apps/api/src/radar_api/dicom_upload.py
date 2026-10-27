@@ -12,6 +12,32 @@ from radar_api.storage import PrivateImageStore
 
 CHUNK_SIZE = 1024 * 1024
 
+FORBIDDEN_MIME_TYPES = frozenset(
+    {
+        "text/html",
+        "application/xhtml+xml",
+        "application/javascript",
+        "text/javascript",
+        "image/svg+xml",
+        "application/x-msdownload",
+        "application/x-executable",
+        "application/x-sh",
+        "application/x-httpd-php",
+    }
+)
+
+FORBIDDEN_MAGIC_PREFIXES = (
+    b"MZ",
+    b"\x7fELF",
+    b"#!",
+    b"<?php",
+    b"<script",
+    b"<!doctype html",
+    b"<html",
+    b"%PDF-",
+    b"PK\x03\x04",
+)
+
 
 class UploadTooLarge(ValueError):
     """The upload exceeded a configured size or file-count limit."""
@@ -66,12 +92,25 @@ async def stage_upload(
 ) -> StagedUpload:
     """Stream one multipart file into a private temporary file with bounded size."""
 
+    content_type = (upload.content_type or "").split(";", 1)[0].strip().lower()
+    if content_type in FORBIDDEN_MIME_TYPES:
+        raise ValueError("Forbidden file content type; only DICOM Part 10 files are accepted")
+
     descriptor, path = store.create_temporary_file()
     size_bytes = 0
     digest = hashlib.sha256()
+    checked_header = False
     try:
         with os.fdopen(descriptor, "wb") as destination:
             while chunk := await upload.read(CHUNK_SIZE):
+                if not checked_header:
+                    checked_header = True
+                    head_lower = chunk[:32].lstrip().lower()
+                    if any(chunk.startswith(prefix) for prefix in FORBIDDEN_MAGIC_PREFIXES) or any(
+                        head_lower.startswith(prefix)
+                        for prefix in (b"<!doctype html", b"<html", b"<script", b"<?php")
+                    ):
+                        raise ValueError("Upload contains forbidden executable or active content")
                 size_bytes += len(chunk)
                 if size_bytes > limits.max_file_bytes:
                     raise UploadTooLarge("DICOM file exceeds the per-file size limit")

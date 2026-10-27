@@ -4,10 +4,15 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { Study } from "@radar-ai/contracts";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+import { useAuth } from "@/components/AuthContext";
+import {
+  apiFetch,
+  assertValidUuid,
+  validateDicomFilesBeforeUpload,
+} from "@/lib/api-client";
 
 export default function DashboardPage() {
+  const { user, authRequired } = useAuth();
   const [studies, setStudies] = useState<Study[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -17,12 +22,26 @@ export default function DashboardPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const response = await fetch(`${API_BASE}/v1/studies`, { cache: "no-store" });
+      const response = await apiFetch("/v1/studies");
+      if (response.status === 401) {
+        throw new Error(
+          "Autentikasi diperlukan. Silakan klik 'Login Peneliti' di bagian atas halaman."
+        );
+      }
+      if (response.status === 429) {
+        throw new Error(
+          "Batas laju permintaan (rate limit) tercapai. Tunggu beberapa saat sebelum memuat ulang."
+        );
+      }
       if (!response.ok) throw new Error(`API returned ${response.status}`);
       setStudies((await response.json()) as Study[]);
       setError("");
-    } catch {
-      setError("Tidak dapat menghubungi API. Pastikan layanan berjalan di port 8000.");
+    } catch (cause) {
+      setError(
+        cause instanceof Error && !cause.message.startsWith("API returned")
+          ? cause.message
+          : "Tidak dapat menghubungi API. Pastikan layanan berjalan di port 8000."
+      );
     } finally {
       setLoading(false);
     }
@@ -32,16 +51,30 @@ export default function DashboardPage() {
     let ignore = false;
     async function fetchStudies() {
       try {
-        const response = await fetch(`${API_BASE}/v1/studies`, { cache: "no-store" });
+        const response = await apiFetch("/v1/studies");
+        if (response.status === 401) {
+          throw new Error(
+            "Autentikasi diperlukan. Silakan klik 'Login Peneliti' di bagian atas halaman."
+          );
+        }
+        if (response.status === 429) {
+          throw new Error(
+            "Batas laju permintaan (rate limit) tercapai. Tunggu beberapa saat."
+          );
+        }
         if (!response.ok) throw new Error(`API returned ${response.status}`);
         const data = (await response.json()) as Study[];
         if (!ignore) {
           setStudies(data);
           setError("");
         }
-      } catch {
+      } catch (cause) {
         if (!ignore) {
-          setError("Tidak dapat menghubungi API. Pastikan layanan berjalan di port 8000.");
+          setError(
+            cause instanceof Error && !cause.message.startsWith("API returned")
+              ? cause.message
+              : "Tidak dapat menghubungi API. Pastikan layanan berjalan di port 8000."
+          );
         }
       } finally {
         if (!ignore) {
@@ -53,47 +86,66 @@ export default function DashboardPage() {
     return () => {
       ignore = true;
     };
-  }, []);
+  }, [user]);
 
   async function uploadSeries(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const files = fileInput.current?.files;
-    if (!files?.length) return;
+    const rawFiles = fileInput.current?.files;
+    if (!rawFiles?.length) return;
+    if (authRequired && !user) {
+      setError("Silakan login melalui Firebase OAuth terlebih dahulu sebelum mengunggah studi DICOM.");
+      return;
+    }
+
     setUploading(true);
     setMessage("");
     setError("");
     let createdStudyId: string | null = null;
     try {
-      const created = await fetch(`${API_BASE}/v1/studies`, {
+      const validatedFiles = await validateDicomFilesBeforeUpload(rawFiles);
+
+      const created = await apiFetch("/v1/studies", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ modality: "CT" }),
       });
+      if (created.status === 401) {
+        throw new Error("Sesi autentikasi tidak valid atau telah berakhir. Silakan login kembali.");
+      }
+      if (created.status === 429) {
+        throw new Error("Terlalu banyak permintaan unggah. Silakan tunggu 1 menit.");
+      }
       if (!created.ok) throw new Error("Gagal membuat catatan studi.");
       const study = (await created.json()) as Study;
-      createdStudyId = study.study_id;
+      createdStudyId = assertValidUuid(study.study_id, "Study ID");
+
       const body = new FormData();
-      Array.from(files).forEach((file) => body.append("files", file));
-      const uploaded = await fetch(`${API_BASE}/v1/studies/${study.study_id}/dicom`, {
+      validatedFiles.forEach((file) => body.append("files", file));
+      const uploaded = await apiFetch(`/v1/studies/${createdStudyId}/dicom`, {
         method: "POST",
         body,
       });
       if (!uploaded.ok) {
         const detail = (await uploaded.json().catch(() => ({}))) as { detail?: string };
-        const message = detail.detail === "Only CT images are accepted"
-          ? "Tag DICOM Modality (0008,0060) menyatakan modalitas selain CT. Jika tag ini kosong, jenis CT diperiksa dari SOP Class UID."
-          : detail.detail ?? `Upload gagal (${uploaded.status}).`;
-        throw new Error(message);
+        const errMessage =
+          detail.detail === "Only CT images are accepted"
+            ? "Tag DICOM Modality (0008,0060) menyatakan modalitas selain CT. Jika tag ini kosong, jenis CT diperiksa dari SOP Class UID."
+            : detail.detail ?? `Upload gagal (${uploaded.status}).`;
+        throw new Error(errMessage);
       }
       createdStudyId = null;
-      setMessage(files.length === 1
-        ? "Irisan DICOM CT tersimpan sebagai studi satu irisan di penyimpanan privat."
-        : "Seri CT tervalidasi dan tersimpan di penyimpanan privat.");
+      setMessage(
+        validatedFiles.length === 1
+          ? "Irisan DICOM CT tersimpan sebagai studi satu irisan di penyimpanan privat."
+          : "Seri CT tervalidasi dan tersimpan di penyimpanan privat."
+      );
       if (fileInput.current) fileInput.current.value = "";
       await refresh();
     } catch (cause) {
       if (createdStudyId) {
-        await fetch(`${API_BASE}/v1/studies/${createdStudyId}`, { method: "DELETE" }).catch(() => undefined);
+        await apiFetch(`/v1/studies/${createdStudyId}`, { method: "DELETE" }).catch(
+          () => undefined
+        );
       }
       setError(cause instanceof Error ? cause.message : "Upload gagal.");
     } finally {
@@ -125,7 +177,7 @@ export default function DashboardPage() {
             {uploading ? "Mengunggah…" : "Validasi dan unggah"}
           </button>
         </form>
-        <p className="upload-note">Tag Modality boleh kosong jika SOP Class UID mengidentifikasi CT. Untuk seri multi-irisan, pilih satu seri yang memiliki metadata Study/Series UID dan posisi irisan. Batas ukuran dan jumlah file mengikuti konfigurasi server; gambar disimpan di penyimpanan privat.</p>
+        <p className="upload-note">Validasi berlapis memeriksa header biner DICM Part 10, ukuran file, penghapusan tag identitas pasien (PHI/PN), larangan overlay/anotasi tertanam, serta rate limiting sebelum gambar disimpan di penyimpanan privat.</p>
       </section>
 
       <section className="queue-panel" aria-labelledby="queue-title">
@@ -144,6 +196,3 @@ export default function DashboardPage() {
     </div>
   );
 }
-
-
-

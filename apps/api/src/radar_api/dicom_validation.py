@@ -61,6 +61,28 @@ IDENTIFYING_KEYWORDS = frozenset(
         "IssuerOfAccessionNumberSequence",
         "ClinicalTrialSiteName",
         "ClinicalTrialSiteID",
+        "OriginalAttributesSequence",
+        "ModifiedAttributesSequence",
+        "OtherPatientIDsSequence",
+        "ConsultingPhysicianName",
+        "HumanPerformerName",
+        "VerifyingObserverName",
+        "VerifyingObserverSequence",
+        "AuthorObserverSequence",
+        "ParticipantSequence",
+        "CustodialOrganizationSequence",
+        "ResponsiblePerson",
+        "PatientMotherBirthName",
+        "PatientReligiousPreference",
+        "MilitaryRank",
+        "BranchOfService",
+        "CountryOfResidence",
+        "RegionOfResidence",
+        "CurrentPatientLocation",
+        "PatientInstitutionResidence",
+        "VisitComments",
+        "AdmissionID",
+        "IssuerOfAdmissionID",
     }
 )
 CT_STORAGE_CLASSES = {str(CTImageStorage), str(EnhancedCTImageStorage)}
@@ -152,10 +174,22 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
         for element in dataset.iterall():
             if element.tag.is_private and _has_value(element.value):
                 raise DicomValidationError("DICOM private metadata must be removed before upload")
-            if element.keyword in IDENTIFYING_KEYWORDS and _has_value(element.value):
+            if 0x6000 <= element.tag.group <= 0x601E and _has_value(element.value):
+                raise DicomValidationError("DICOM overlay planes must be removed before upload")
+            if (
+                element.keyword in IDENTIFYING_KEYWORDS or element.VR == "PN"
+            ) and _has_value(element.value):
                 raise DicomValidationError(
                     "DICOM contains identifying metadata; upload an anonymized series"
                 )
+
+        if (
+            "BurnedInAnnotation" in dataset
+            and str(dataset.BurnedInAnnotation).strip().upper() == "YES"
+        ):
+            raise DicomValidationError(
+                "DICOM image has burned-in annotations that may contain PHI"
+            )
 
         if (
             "PatientIdentityRemoved" in dataset
@@ -188,7 +222,11 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
             raise DicomValidationError("Each DICOM file must contain one complete image slice")
 
         pixels = dataset.pixel_array
-        if not isinstance(pixels, np.ndarray) or pixels.shape != (rows, columns):
+        if (
+            not isinstance(pixels, np.ndarray)
+            or pixels.shape != (rows, columns)
+            or not np.isfinite(pixels).all()
+        ):
             raise DicomValidationError("DICOM pixel data is incomplete or invalid")
 
         has_position = "ImagePositionPatient" in dataset

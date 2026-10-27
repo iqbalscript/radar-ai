@@ -38,6 +38,7 @@ client = TestClient(app)
 
 
 def setup_function() -> None:
+    app.dependency_overrides[get_session] = override_session
     Base.metadata.create_all(bind=engine)
 
 

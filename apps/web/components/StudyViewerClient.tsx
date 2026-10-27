@@ -9,11 +9,18 @@ import type {
   StudyLocalizations,
   FindingReviewStatus,
 } from "@radar-ai/contracts";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+import { useAuth } from "@/components/AuthContext";
+import {
+  API_BASE,
+  apiFetch,
+  assertValidUuid,
+  fetchAuthenticatedImageBlobUrl,
+  isValidUuid,
+} from "@/lib/api-client";
 
 async function fetchModelScores(studyId: string): Promise<StudyModelScores> {
-  const response = await fetch(`${API_BASE}/v1/studies/${studyId}/scores`, { cache: "no-store" });
+  const safeId = assertValidUuid(studyId, "Study ID");
+  const response = await apiFetch(`/v1/studies/${safeId}/scores`);
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { detail?: string };
     throw new Error(body.detail ?? `Skor model tidak tersedia (HTTP ${response.status}).`);
@@ -22,7 +29,8 @@ async function fetchModelScores(studyId: string): Promise<StudyModelScores> {
 }
 
 async function fetchStudyLocalizations(studyId: string): Promise<StudyLocalizations> {
-  const response = await fetch(`${API_BASE}/v1/studies/${studyId}/localizations`, { cache: "no-store" });
+  const safeId = assertValidUuid(studyId, "Study ID");
+  const response = await apiFetch(`/v1/studies/${safeId}/localizations`);
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { detail?: string };
     throw new Error(body.detail ?? `Lokalisasi lesi tidak tersedia (HTTP ${response.status}).`);
@@ -31,6 +39,7 @@ async function fetchStudyLocalizations(studyId: string): Promise<StudyLocalizati
 }
 
 export function StudyViewerClient({ studyId }: { studyId: string }) {
+  const { user, authRequired } = useAuth();
   const [study, setStudy] = useState<Study | null>(null);
   const [analysis, setAnalysis] = useState<StudyAnalysisResponse | null>(null);
   const [modelScores, setModelScores] = useState<StudyModelScores | null>(null);
@@ -41,39 +50,91 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [reviewError, setReviewError] = useState("");
+  const [blobImage, setBlobImage] = useState<{ sliceId: string; url: string } | null>(null);
   const slice = study?.slices[index];
   const topCandidate = modelScores?.slices.reduce((best, current) =>
     current.class_1_score > best.class_1_score ? current : best,
   );
   const activeSliceScore = modelScores?.slices.find((item) => item.index === index);
   const activeLocalization = localizations?.slices.find((item) => item.index === index);
-  const imageUrl = useMemo(
-    () => slice ? `${API_BASE}/v1/studies/${studyId}/slices/${slice.slice_id}/image` : "",
-    [slice, studyId],
-  );
+
+  const fallbackImageUrl = useMemo(() => {
+    if (!slice || !isValidUuid(studyId) || !isValidUuid(slice.slice_id)) return "";
+    return `${API_BASE}/v1/studies/${studyId}/slices/${slice.slice_id}/image`;
+  }, [slice, studyId]);
+
+  useEffect(() => {
+    if (!slice || !user) {
+      return;
+    }
+    const targetSliceId = slice.slice_id;
+    const controller = new AbortController();
+    let createdObjectUrl = "";
+
+    fetchAuthenticatedImageBlobUrl(studyId, targetSliceId, controller.signal)
+      .then((objectUrl) => {
+        createdObjectUrl = objectUrl;
+        setBlobImage({ sliceId: targetSliceId, url: objectUrl });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setBlobImage(null);
+        }
+      });
+
+    return () => {
+      controller.abort();
+      if (createdObjectUrl) {
+        URL.revokeObjectURL(createdObjectUrl);
+      }
+    };
+  }, [slice, studyId, user]);
+
+  const activeImageUrl =
+    user && slice && blobImage?.sliceId === slice.slice_id
+      ? blobImage.url
+      : fallbackImageUrl;
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const response = await fetch(`${API_BASE}/v1/studies/${studyId}`, { cache: "no-store" });
+      const safeStudyId = assertValidUuid(studyId, "Study ID");
+      const response = await apiFetch(`/v1/studies/${safeStudyId}`);
+      if (response.status === 401) {
+        throw new Error(
+          "Autentikasi diperlukan untuk membuka studi ini. Silakan login terlebih dahulu."
+        );
+      }
       if (response.status === 404) throw new Error("Studi tidak ditemukan.");
       if (!response.ok) throw new Error(`API returned ${response.status}`);
       const value = (await response.json()) as Study;
       setStudy(value);
       setIndex((current) => Math.min(current, Math.max(0, value.slices.length - 1)));
-      const analysisResponse = await fetch(`${API_BASE}/v1/studies/${studyId}/analysis`, { cache: "no-store" });
-      setAnalysis(analysisResponse.ok ? (await analysisResponse.json()) as StudyAnalysisResponse : null);
+      const analysisResponse = await apiFetch(`/v1/studies/${safeStudyId}/analysis`);
+      setAnalysis(
+        analysisResponse.ok
+          ? ((await analysisResponse.json()) as StudyAnalysisResponse)
+          : null
+      );
       setModelScores(null);
       setLocalizations(null);
       setScoreError("");
       setLocalizationError("");
-      void fetchModelScores(studyId)
+      void fetchModelScores(safeStudyId)
         .then(setModelScores)
-        .catch((cause: unknown) => setScoreError(cause instanceof Error ? cause.message : "Skor model tidak tersedia."));
-      void fetchStudyLocalizations(studyId)
+        .catch((cause: unknown) =>
+          setScoreError(
+            cause instanceof Error ? cause.message : "Skor model tidak tersedia."
+          )
+        );
+      void fetchStudyLocalizations(safeStudyId)
         .then(setLocalizations)
-        .catch((cause: unknown) => setLocalizationError(cause instanceof Error ? cause.message : "Lokalisasi lesi tidak tersedia."));
+        .catch((cause: unknown) =>
+          setLocalizationError(
+            cause instanceof Error ? cause.message : "Lokalisasi lesi tidak tersedia."
+          )
+        );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Tidak dapat memuat studi.");
     } finally {
@@ -85,7 +146,13 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
     let ignore = false;
     async function fetchStudy() {
       try {
-        const response = await fetch(`${API_BASE}/v1/studies/${studyId}`, { cache: "no-store" });
+        const safeStudyId = assertValidUuid(studyId, "Study ID");
+        const response = await apiFetch(`/v1/studies/${safeStudyId}`);
+        if (response.status === 401) {
+          throw new Error(
+            "Autentikasi diperlukan untuk membuka studi ini. Silakan login terlebih dahulu."
+          );
+        }
         if (response.status === 404) throw new Error("Studi tidak ditemukan.");
         if (!response.ok) throw new Error(`API returned ${response.status}`);
         const value = (await response.json()) as Study;
@@ -98,19 +165,35 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
           setScoreError("");
           setLocalizationError("");
         }
-        const analysisResponse = await fetch(`${API_BASE}/v1/studies/${studyId}/analysis`, { cache: "no-store" });
+        const analysisResponse = await apiFetch(`/v1/studies/${safeStudyId}/analysis`);
         if (!ignore) {
-          setAnalysis(analysisResponse.ok ? (await analysisResponse.json()) as StudyAnalysisResponse : null);
+          setAnalysis(
+            analysisResponse.ok
+              ? ((await analysisResponse.json()) as StudyAnalysisResponse)
+              : null
+          );
         }
-        void fetchModelScores(studyId)
-          .then((scores) => { if (!ignore) setModelScores(scores); })
+        void fetchModelScores(safeStudyId)
+          .then((scores) => {
+            if (!ignore) setModelScores(scores);
+          })
           .catch((cause: unknown) => {
-            if (!ignore) setScoreError(cause instanceof Error ? cause.message : "Skor model tidak tersedia.");
+            if (!ignore) {
+              setScoreError(
+                cause instanceof Error ? cause.message : "Skor model tidak tersedia."
+              );
+            }
           });
-        void fetchStudyLocalizations(studyId)
-          .then((result) => { if (!ignore) setLocalizations(result); })
+        void fetchStudyLocalizations(safeStudyId)
+          .then((result) => {
+            if (!ignore) setLocalizations(result);
+          })
           .catch((cause: unknown) => {
-            if (!ignore) setLocalizationError(cause instanceof Error ? cause.message : "Lokalisasi lesi tidak tersedia.");
+            if (!ignore) {
+              setLocalizationError(
+                cause instanceof Error ? cause.message : "Lokalisasi lesi tidak tersedia."
+              );
+            }
           });
       } catch (cause) {
         if (!ignore) {
@@ -126,24 +209,52 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
     return () => {
       ignore = true;
     };
-  }, [studyId]);
+  }, [studyId, user]);
 
   async function recordReview(findingId: string, review_status: FindingReviewStatus) {
     setReviewError("");
+    if (authRequired && !user) {
+      setReviewError(
+        "Silakan login dengan akun peneliti (Firebase OAuth) untuk mencatat keputusan review."
+      );
+      return;
+    }
     try {
-      const response = await fetch(`${API_BASE}/v1/studies/${studyId}/findings/${findingId}/review`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ review_status }),
-      });
-      if (!response.ok) throw new Error(`Keputusan reviewer gagal disimpan (HTTP ${response.status}).`);
+      const safeStudyId = assertValidUuid(studyId, "Study ID");
+      const safeFindingId = assertValidUuid(findingId, "Finding ID");
+      const response = await apiFetch(
+        `/v1/studies/${safeStudyId}/findings/${safeFindingId}/review`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ review_status }),
+        }
+      );
+      if (response.status === 401) {
+        throw new Error(
+          "Autentikasi diperlukan untuk menyimpan keputusan reviewer."
+        );
+      }
+      if (!response.ok) {
+        throw new Error(
+          `Keputusan reviewer gagal disimpan (HTTP ${response.status}).`
+        );
+      }
       if (!analysis) return;
       setAnalysis({
         ...analysis,
-        findings: analysis.findings.map((finding) => finding.finding_id === findingId ? { ...finding, review_status } : finding),
+        findings: analysis.findings.map((finding) =>
+          finding.finding_id === findingId
+            ? { ...finding, review_status }
+            : finding
+        ),
       });
     } catch (cause) {
-      setReviewError(cause instanceof Error ? cause.message : "Keputusan reviewer gagal disimpan.");
+      setReviewError(
+        cause instanceof Error
+          ? cause.message
+          : "Keputusan reviewer gagal disimpan."
+      );
     }
   }
 
@@ -166,7 +277,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                   <>
                     <div className="ct-image-frame" style={activeLocalization ? { aspectRatio: `${activeLocalization.image_width} / ${activeLocalization.image_height}` } : undefined}>
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={imageUrl} alt={`Anonymized CT slice ${index + 1} of ${study.slices.length}`} />
+                      <img src={activeImageUrl} alt={`Anonymized CT slice ${index + 1} of ${study.slices.length}`} />
                       {activeLocalization?.box && <div className="ct-lesion-box" style={{
                         left: `${activeLocalization.box.x * 100}%`,
                         top: `${activeLocalization.box.y * 100}%`,
@@ -254,7 +365,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
               })() : <div className="notice notice-warning" role="status">{scoreError ? "Kandidat model belum tersedia karena inference gagal." : "Memuat skor inference untuk menampilkan kandidat model…"}</div>}
               <p className="muted-copy">Semua skor model bersifat eksperimental dan tidak terkalibrasi. Hasil memerlukan peninjauan manusia.</p>
               {analysis && <p className="muted-copy">Model: {analysis.model_version.provider} · {analysis.model_version.model_id} · {analysis.model_version.prompt_version}</p>}
-              <dl className="study-metadata"><div><dt>Status pipeline</dt><dd>{study.status}</dd></div><div><dt>Provider</dt><dd>{analysis?.model_version.provider ?? "Belum dikonfigurasi"}</dd></div><div><dt>Review</dt><dd>{analysis?.findings.filter((finding) => finding.review_status === "pending").length ?? 0} menunggu</dd></div></dl>
+              <dl className="study-metadata"><div><dt>Status pipeline</dt><dd>{study.status}</dd></div><div><dt>Provider</dt><dd>{analysis?.model_version.provider ?? "Belum dikonfigurasi"}</dd></div><div><dt>Reviewer aktif</dt><dd>{user?.email ?? "local-reviewer"}</dd></div></dl>
             </aside>
           </div>
         </>
@@ -263,6 +374,3 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
     </div>
   );
 }
-
-
-
