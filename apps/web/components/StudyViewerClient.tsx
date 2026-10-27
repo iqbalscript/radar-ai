@@ -6,6 +6,7 @@ import type {
   Study,
   StudyAnalysisResponse,
   StudyModelScores,
+  StudyLocalizations,
   FindingReviewStatus,
 } from "@radar-ai/contracts";
 
@@ -20,10 +21,21 @@ async function fetchModelScores(studyId: string): Promise<StudyModelScores> {
   return (await response.json()) as StudyModelScores;
 }
 
+async function fetchStudyLocalizations(studyId: string): Promise<StudyLocalizations> {
+  const response = await fetch(`${API_BASE}/v1/studies/${studyId}/localizations`, { cache: "no-store" });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(body.detail ?? `Lokalisasi lesi tidak tersedia (HTTP ${response.status}).`);
+  }
+  return (await response.json()) as StudyLocalizations;
+}
+
 export function StudyViewerClient({ studyId }: { studyId: string }) {
   const [study, setStudy] = useState<Study | null>(null);
   const [analysis, setAnalysis] = useState<StudyAnalysisResponse | null>(null);
   const [modelScores, setModelScores] = useState<StudyModelScores | null>(null);
+  const [localizations, setLocalizations] = useState<StudyLocalizations | null>(null);
+  const [localizationError, setLocalizationError] = useState("");
   const [scoreError, setScoreError] = useState("");
   const [index, setIndex] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -34,6 +46,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
     current.class_1_score > best.class_1_score ? current : best,
   );
   const activeSliceScore = modelScores?.slices.find((item) => item.index === index);
+  const activeLocalization = localizations?.slices.find((item) => item.index === index);
   const imageUrl = useMemo(
     () => slice ? `${API_BASE}/v1/studies/${studyId}/slices/${slice.slice_id}/image` : "",
     [slice, studyId],
@@ -52,10 +65,15 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
       const analysisResponse = await fetch(`${API_BASE}/v1/studies/${studyId}/analysis`, { cache: "no-store" });
       setAnalysis(analysisResponse.ok ? (await analysisResponse.json()) as StudyAnalysisResponse : null);
       setModelScores(null);
+      setLocalizations(null);
       setScoreError("");
+      setLocalizationError("");
       void fetchModelScores(studyId)
         .then(setModelScores)
         .catch((cause: unknown) => setScoreError(cause instanceof Error ? cause.message : "Skor model tidak tersedia."));
+      void fetchStudyLocalizations(studyId)
+        .then(setLocalizations)
+        .catch((cause: unknown) => setLocalizationError(cause instanceof Error ? cause.message : "Lokalisasi lesi tidak tersedia."));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Tidak dapat memuat studi.");
     } finally {
@@ -76,7 +94,9 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
           setIndex((current) => Math.min(current, Math.max(0, value.slices.length - 1)));
           setError("");
           setModelScores(null);
+          setLocalizations(null);
           setScoreError("");
+          setLocalizationError("");
         }
         const analysisResponse = await fetch(`${API_BASE}/v1/studies/${studyId}/analysis`, { cache: "no-store" });
         if (!ignore) {
@@ -86,6 +106,11 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
           .then((scores) => { if (!ignore) setModelScores(scores); })
           .catch((cause: unknown) => {
             if (!ignore) setScoreError(cause instanceof Error ? cause.message : "Skor model tidak tersedia.");
+          });
+        void fetchStudyLocalizations(studyId)
+          .then((result) => { if (!ignore) setLocalizations(result); })
+          .catch((cause: unknown) => {
+            if (!ignore) setLocalizationError(cause instanceof Error ? cause.message : "Lokalisasi lesi tidak tersedia.");
           });
       } catch (cause) {
         if (!ignore) {
@@ -139,8 +164,16 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
               <div className="image-stage">
                 {slice ? (
                   <>
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={imageUrl} alt={`Anonymized CT slice ${index + 1} of ${study.slices.length}`} />
+                    <div className="ct-image-frame" style={activeLocalization ? { aspectRatio: `${activeLocalization.image_width} / ${activeLocalization.image_height}` } : undefined}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={imageUrl} alt={`Anonymized CT slice ${index + 1} of ${study.slices.length}`} />
+                      {activeLocalization?.box && <div className="ct-lesion-box" style={{
+                        left: `${activeLocalization.box.x * 100}%`,
+                        top: `${activeLocalization.box.y * 100}%`,
+                        width: `${activeLocalization.box.width * 100}%`,
+                        height: `${activeLocalization.box.height * 100}%`,
+                      }}><span>Area mask ICH · riset</span></div>}
+                    </div>
                     {activeSliceScore && <div className={`ct-model-label${topCandidate?.index === index ? " ct-model-label-candidate" : ""}`} role="status" aria-live="polite">
                       <strong>{topCandidate?.index === index ? "KANDIDAT LABEL POSITIF ICH" : "SKOR LABEL POSITIF ICH"}</strong>
                       <span>{(activeSliceScore.class_1_score * 100).toFixed(1)}%</span>
@@ -176,6 +209,24 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
               })() : <div className="notice notice-warning" role="status">
                 <strong>{scoreError ? "Inference belum tersedia." : "Menjalankan inference lokal…"}</strong>
                 {scoreError && <><br />{scoreError}</>}
+              </div>}
+              <h3>Lokalisasi area oleh SAMIHS</h3>
+              {localizations ? (() => {
+                const candidates = localizations.slices.filter((item) => item.box !== null);
+                const largest = candidates.reduce<(typeof candidates)[number] | null>(
+                  (best, current) => !best || current.mask_pixels > best.mask_pixels ? current : best,
+                  null,
+                );
+                return <article className="finding-card">
+                  {largest ? <>
+                    <p>Mask menemukan area kandidat pada {candidates.length} irisan. Kotak mengikuti batas area mask irisan, bukan diagnosis.</p>
+                    <button className="evidence-link" type="button" onClick={() => setIndex(largest.index)}>Lihat area mask terbesar · irisan #{largest.index + 1}</button>
+                  </> : <p>Model tidak menghasilkan area mask pada seri ini.</p>}
+                  <p className="muted-copy">{localizations.model_id} · {localizations.device} · threshold {localizations.threshold} · checkpoint {localizations.checkpoint_sha256.slice(0, 12)}</p>
+                </article>;
+              })() : <div className="notice notice-warning" role="status">
+                <strong>{localizationError ? "Lokalisasi belum tersedia." : "Menjalankan model lokalisasi lokal…"}</strong>
+                {localizationError && <><br />{localizationError}</>}
               </div>}
               <h3>Kandidat model & temuan tersimpan</h3>
               {reviewError && <div className="notice notice-error" role="alert">{reviewError}</div>}

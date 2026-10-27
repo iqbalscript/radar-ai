@@ -62,3 +62,30 @@ export interface StudyModelScores {
   slices: StudySliceScore[];
 }
 
+export interface Box2D {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SliceLocalization {
+  slice_id: string;
+  index: number;
+  image_width: number;
+  image_height: number;
+  box: Box2D | null;
+  mask_pixels: number;
+}
+
+export interface StudyLocalizations {
+  schema_version: "1.0.0";
+  study_id: string;
+  model_id: string;
+  checkpoint_sha256: string;
+  device: string;
+  threshold: number;
+  score_semantics: "SAMIHS binary ICH segmentation mask; research localization only";
+  slices: SliceLocalization[];
+}
+
