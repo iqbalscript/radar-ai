@@ -208,7 +208,9 @@ def localize_dicom_series(paths: tuple[str, ...]) -> dict[str, Any]:
     except LocalizationUnavailableError:
         raise
     except Exception as error:
-        raise LocalizationUnavailableError("SAMIHS inference could not process this CT series") from error
+        raise LocalizationUnavailableError(
+            "SAMIHS inference could not process this CT series"
+        ) from error
 
     boxes: list[dict[str, Any]] = []
     for index in range(mask.shape[2]):
