@@ -259,8 +259,10 @@ def get_study_model_scores(
         "model_id": result["model_id"],
         "checkpoint_sha256": result["checkpoint_sha256"],
         "device": result["device"],
-        "score_semantics": "Uncalibrated binary class scores; not a diagnosis",
-        "class_1_label_semantics": "Unspecified by dataset metadata",
+        "score_semantics": "Uncalibrated RSNA ICH slice-label scores; not a diagnosis",
+        "class_1_label_semantics": (
+            "RSNA ICH slice label 1 means hemorrhage annotated present; research score only"
+        ),
         "slices": slice_scores,
     }
 

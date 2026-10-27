@@ -84,8 +84,10 @@ class StudyModelScores(ContractModel):
     model_id: str = Field(min_length=1)
     checkpoint_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     device: str = Field(min_length=1)
-    score_semantics: Literal["Uncalibrated binary class scores; not a diagnosis"]
-    class_1_label_semantics: Literal["Unspecified by dataset metadata"]
+    score_semantics: Literal["Uncalibrated RSNA ICH slice-label scores; not a diagnosis"]
+    class_1_label_semantics: Literal[
+        "RSNA ICH slice label 1 means hemorrhage annotated present; research score only"
+    ]
     slices: list[StudySliceScore] = Field(min_length=1)
 
 
