@@ -319,71 +319,35 @@ export async function signInWithGooglePopup(): Promise<AuthUser> {
   authUrl.searchParams.set("state", state);
   authUrl.searchParams.set("prompt", "select_account");
 
-  const popup = window.open(
-    authUrl.toString(),
-    "radar_google_oauth",
-    "width=520,height=640,menubar=no,toolbar=no,location=no,status=no"
-  );
-  if (!popup) {
-    throw new Error("Popup login diblokir oleh browser. Izinkan popup untuk situs ini.");
-  }
-
   return new Promise<AuthUser>((resolve, reject) => {
-    let resolved = false;
+    let popup: Window | null = null;
+    let timeoutId = 0;
+    let checkClosed = 0;
+    let completed = false;
 
-    // Bersihkan hasil sesi sebelumnya dari localStorage
-    try {
-      localStorage.removeItem("RADAR_GOOGLE_OAUTH_RESULT");
-    } catch {}
-
-    const timeoutId = window.setTimeout(() => {
-      cleanup();
-      if (!resolved) {
-        reject(new Error("Waktu login Google OAuth habis."));
-      }
-    }, 120_000);
-
-    let channel: BroadcastChannel | null = null;
-    try {
-      if (typeof BroadcastChannel !== "undefined") {
-        channel = new BroadcastChannel("RADAR_GOOGLE_OAUTH_CHANNEL");
-        channel.onmessage = (event: MessageEvent) => {
-          handlePayload(event.data);
-        };
-      }
-    } catch {}
-
-    function onStorage(event: StorageEvent) {
-      if (event.key !== "RADAR_GOOGLE_OAUTH_RESULT" || !event.newValue) return;
-      try {
-        const parsed = JSON.parse(event.newValue) as unknown;
-        handlePayload(parsed);
-      } catch {}
+    function cleanup() {
+      window.clearTimeout(timeoutId);
+      window.clearInterval(checkClosed);
+      window.removeEventListener("message", onMessage);
     }
 
-    function onMessage(event: MessageEvent) {
-      if (event.origin !== window.location.origin) return;
-      handlePayload(event.data);
-    }
-
-    function handlePayload(data: unknown) {
-      if (resolved) return;
-      const payload = data as {
-        type?: string;
-        state?: string;
-        idToken?: string;
-        accessToken?: string;
-        error?: string;
-        errorDescription?: string;
-      } | null;
-      if (!payload || payload.type !== "RADAR_GOOGLE_OAUTH_RESULT") return;
-
-      resolved = true;
+    function finish(payload: {
+      state?: string;
+      idToken?: string;
+      accessToken?: string;
+      error?: string;
+    }) {
+      if (completed) return;
+      completed = true;
+      // The callback waits for this acknowledgement before closing. This avoids
+      // racing the browser's popup.closed signal against the queued message.
+      popup?.postMessage(
+        { type: "RADAR_GOOGLE_OAUTH_ACK", state: payload.state ?? "" },
+        window.location.origin
+      );
       cleanup();
-
       if (payload.error) {
-        const desc = payload.errorDescription ? `: ${payload.errorDescription}` : "";
-        reject(new Error(`Google OAuth gagal (${payload.error}${desc})`));
+        reject(new Error(`Google OAuth gagal: ${payload.error}`));
         return;
       }
       if (payload.state !== state) {
@@ -396,52 +360,57 @@ export async function signInWithGooglePopup(): Promise<AuthUser> {
       }).then(resolve, reject);
     }
 
-    const checkClosed = window.setInterval(() => {
-      if (resolved) return;
-
-      // Periksa terlebih dahulu apakah hasil sudah tersimpan di localStorage
-      try {
-        const raw = localStorage.getItem("RADAR_GOOGLE_OAUTH_RESULT");
-        if (raw) {
-          handlePayload(JSON.parse(raw));
-          if (resolved) return;
-        }
-      } catch {}
-
-      if (popup.closed) {
-        // Berikan toleransi waktu 800ms jika pesan sedang dikirimkan antar-jendela
-        window.setTimeout(() => {
-          if (resolved) return;
-          try {
-            const raw = localStorage.getItem("RADAR_GOOGLE_OAUTH_RESULT");
-            if (raw) {
-              handlePayload(JSON.parse(raw));
-              if (resolved) return;
-            }
-          } catch {}
-          cleanup();
-          reject(new Error("Jendela login Google ditutup sebelum selesai."));
-        }, 800);
-      }
-    }, 600);
-
-    function cleanup() {
-      window.clearTimeout(timeoutId);
-      window.clearInterval(checkClosed);
-      window.removeEventListener("message", onMessage);
-      window.removeEventListener("storage", onStorage);
-      if (channel) {
-        try {
-          channel.close();
-        } catch {}
-      }
-      try {
-        localStorage.removeItem("RADAR_GOOGLE_OAUTH_RESULT");
-      } catch {}
+    function onMessage(event: MessageEvent) {
+      if (event.origin !== window.location.origin) return;
+      if (popup && event.source !== popup) return;
+      handlePayload(event.data);
     }
 
+    function handlePayload(data: unknown) {
+      const payload = data as {
+        type?: string;
+        state?: string;
+        idToken?: string;
+        accessToken?: string;
+        error?: string;
+      } | null;
+      if (!payload || payload.type !== "RADAR_GOOGLE_OAUTH_RESULT") return;
+      finish(payload);
+    }
+
+    // Register the receiver before opening the popup so a fast Google redirect
+    // cannot post its result before the listener exists.
     window.addEventListener("message", onMessage);
-    window.addEventListener("storage", onStorage);
+    timeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(
+        new Error(
+          "Google OAuth tidak mengembalikan respons. Pastikan domain dan redirect URI OAuth diizinkan."
+        )
+      );
+    }, 120_000);
+
+    popup = window.open(
+      authUrl.toString(),
+      "radar_google_oauth",
+      "width=520,height=640,menubar=no,toolbar=no,location=no,status=no"
+    );
+    if (!popup) {
+      cleanup();
+      reject(new Error("Popup login diblokir oleh browser. Izinkan popup untuk situs ini."));
+      return;
+    }
+
+    // The callback waits for an acknowledgement before closing, so a closed
+    // window here means the user cancelled before the callback completed.
+    if (!completed) {
+      checkClosed = window.setInterval(() => {
+        if (!completed && popup?.closed) {
+          cleanup();
+          reject(new Error("Jendela login Google ditutup sebelum selesai."));
+        }
+      }, 600);
+    }
   });
 }
 
