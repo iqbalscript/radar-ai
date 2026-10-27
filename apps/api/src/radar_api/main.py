@@ -434,6 +434,19 @@ async def upload_dicom_series(
             total_size += item.size_bytes
 
         validated = [validate_ct_slice(item.path, max_pixels=limits.max_pixels) for item in staged]
+        if len(staged) > 1 and any(
+            item.study_instance_uid is None
+            or item.series_instance_uid is None
+            or item.sop_instance_uid is None
+            or item.slice_position is None
+            or item.orientation is None
+            for item in validated
+        ):
+            raise DicomValidationError(
+                "These CT images lack series identifiers or slice geometry. "
+                "Upload a single image as a one-slice study, or upload a series "
+                "that includes its study, series, and position metadata."
+            )
         if len({item.study_instance_uid for item in validated}) != 1:
             raise DicomValidationError("DICOM files do not belong to the same study")
         if len({item.series_instance_uid for item in validated}) != 1:
@@ -448,11 +461,14 @@ async def upload_dicom_series(
             for item in validated[1:]
         ):
             raise DicomValidationError("DICOM series image orientations do not match")
-        if len({round(item.slice_position, 4) for item in validated}) != len(validated):
+        if all(item.slice_position is not None for item in validated) and len(
+            {round(item.slice_position, 4) for item in validated if item.slice_position is not None}
+        ) != len(validated):
             raise DicomValidationError("DICOM series contains duplicate slice positions")
 
         ordered = sorted(
-            zip(staged, validated, strict=True), key=lambda item: item[1].slice_position
+            zip(staged, validated, strict=True),
+            key=lambda item: item[1].slice_position if item[1].slice_position is not None else 0.0,
         )
         for index, (upload, metadata) in enumerate(ordered):
             asset_id = uuid4()
@@ -503,4 +519,5 @@ async def upload_dicom_series(
             item.path.unlink(missing_ok=True)
         for upload in files:
             await upload.close()
+
 
