@@ -188,12 +188,20 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
             )
 
         for element in dataset.iterall():
+            is_pseudonymous_patient_id = (
+                element.keyword == "PatientID"
+                and ANONYMIZED_IDENTIFIER_PATTERN.fullmatch(
+                    str(element.value).strip()
+                )
+                is not None
+            )
             if element.tag.is_private and _has_value(element.value):
                 raise DicomValidationError("DICOM private metadata must be removed before upload")
             if 0x6000 <= element.tag.group <= 0x601E and _has_value(element.value):
                 raise DicomValidationError("DICOM overlay planes must be removed before upload")
             if (
-                element.keyword in IDENTIFYING_KEYWORDS or element.VR == "PN"
+                (element.keyword in IDENTIFYING_KEYWORDS and not is_pseudonymous_patient_id)
+                or element.VR == "PN"
             ) and _has_value(element.value):
                 raise DicomValidationError(
                     "DICOM contains identifying metadata; upload an anonymized series"
