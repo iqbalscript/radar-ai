@@ -2,13 +2,14 @@
 
 **RADAR AI / RDA-2 — Sprint 1**  
 **Prepared:** 2026-10-26 (WIB)  
-**Status:** Offline runner implemented; approved checkpoint, CT fixtures, and model execution pending  
+**Status:** Local binary baseline trained; local web inference wired; class semantics remain unconfirmed
 **Scope:** Research prototype only — **NOT FOR CLINICAL USE**
 
 ## Runner
 
 `apps/api/src/radar_api/ct_inference.py` and `apps/api/scripts/score_ct.py` provide an offline
-DenseNet121 runner for six-label ICH checkpoints. The runner:
+DenseNet121 runner for binary and six-label checkpoints. The API can also score an uploaded study
+with a configured binary checkpoint through `GET /v1/studies/{study_id}/scores`. The runner:
 
 - Loads only an operator-supplied local checkpoint, with no weight downloads or fallback model.
 - Requires a strict DenseNet121 state dict with six outputs in the documented label order:
@@ -78,24 +79,29 @@ python scripts/score_ct.py `
 The input directory currently expects `*.dcm` files. Pass a single DICOM path to score one slice.
 Do not place patient data, fixtures, labels, or output score files in this repository.
 
+## Web viewer integration
+
+The local API lazily loads `data/model-artifacts/ct-binary-densenet121.pt` relative to `apps/api`.
+Override the path with `RADAR_CT_CHECKPOINT`; `RADAR_CT_DEVICE=auto` selects CUDA when available and
+otherwise uses CPU. The checkpoint is ignored by Git and must be placed on each API host locally.
+When the viewer opens a study, it requests per-slice class scores from the API and shows the highest
+class-1 slice as navigable evidence. Missing or incompatible checkpoints return an explicit
+unavailable status; the UI does not invent scores.
+
+The source dataset records binary labels `0` and `1`, but its class-1 clinical meaning has not been
+verified. The viewer therefore labels output as a generic, uncalibrated class score and does not
+convert it into a suspected-hemorrhage finding. This result is research-only and not for clinical
+use.
+
 ## Evidence and dependent-workstream handoff
 
-No approved pretrained checkpoint or reference DICOM fixtures are present in this workspace.
-The host reports an NVIDIA GeForce RTX 3050 6GB Laptop GPU and `torch.cuda.is_available() == True`,
-but the installed environment lacks `torchvision`; a package install attempt was blocked by the
-workspace's network restriction. Therefore no model outputs or checkpoint-backed GPU run are
-claimed here.
-Preprocessing has synthetic-fixture unit coverage in `apps/api/tests/test_dicom_preprocessing.py`,
-but those tests do not establish model validity. The dependent data/modeling owner should provide:
-
-1. The approved local checkpoint and its provenance/weight SHA-256 under the source terms.
-2. A small authorized reference fixture set held outside Git, with expected provenance kept private.
-3. A recorded CUDA/PyTorch/torchvision version and successful command output from the RTX 3050.
-4. A review artifact or PR link shared with the ingestion/modeling workstream.
-
-Dataset terms and the missing authorized local profile are tracked in
-[`rsna-ich-licensing-and-profile.md`](./rsna-ich-licensing-and-profile.md). This is a code handoff,
-not a claim that all acceptance criteria have passed. The prototype is **NOT FOR CLINICAL USE**.
+The local binary checkpoint was trained and scored on an NVIDIA GeForce RTX 3050 6GB Laptop GPU.
+The private checkpoint, CT files, and detailed metrics remain in the ignored local
+`apps/api/data/model-artifacts/` directory and are not source-controlled. The summary below records
+one experiment only; it does not establish clinical performance or external validity. Dataset
+terms and the RSNA reference profile are tracked in
+[`rsna-ich-licensing-and-profile.md`](./rsna-ich-licensing-and-profile.md). The prototype remains
+**NOT FOR CLINICAL USE**.
 
 ## Local binary dataset training
 
@@ -141,5 +147,6 @@ The checkpoint and per-fixture score JSON are in the ignored local `apps/api/dat
 folder and must not be committed or shared. This dataset profile is local workspace evidence, not a
 source or licensing determination. Confirm that label `1` has the intended meaning and check the
 dataset's own usage terms before interpreting or sharing results.
+
 
 

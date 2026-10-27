@@ -2,13 +2,29 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { Study, StudyAnalysisResponse, FindingReviewStatus } from "@radar-ai/contracts";
+import type {
+  Study,
+  StudyAnalysisResponse,
+  StudyModelScores,
+  FindingReviewStatus,
+} from "@radar-ai/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+async function fetchModelScores(studyId: string): Promise<StudyModelScores> {
+  const response = await fetch(`${API_BASE}/v1/studies/${studyId}/scores`, { cache: "no-store" });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(body.detail ?? `Skor model tidak tersedia (HTTP ${response.status}).`);
+  }
+  return (await response.json()) as StudyModelScores;
+}
 
 export function StudyViewerClient({ studyId }: { studyId: string }) {
   const [study, setStudy] = useState<Study | null>(null);
   const [analysis, setAnalysis] = useState<StudyAnalysisResponse | null>(null);
+  const [modelScores, setModelScores] = useState<StudyModelScores | null>(null);
+  const [scoreError, setScoreError] = useState("");
   const [index, setIndex] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -31,6 +47,11 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
       setIndex((current) => Math.min(current, Math.max(0, value.slices.length - 1)));
       const analysisResponse = await fetch(`${API_BASE}/v1/studies/${studyId}/analysis`, { cache: "no-store" });
       setAnalysis(analysisResponse.ok ? (await analysisResponse.json()) as StudyAnalysisResponse : null);
+      setModelScores(null);
+      setScoreError("");
+      void fetchModelScores(studyId)
+        .then(setModelScores)
+        .catch((cause: unknown) => setScoreError(cause instanceof Error ? cause.message : "Skor model tidak tersedia."));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Tidak dapat memuat studi.");
     } finally {
@@ -50,11 +71,18 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
           setStudy(value);
           setIndex((current) => Math.min(current, Math.max(0, value.slices.length - 1)));
           setError("");
+          setModelScores(null);
+          setScoreError("");
         }
         const analysisResponse = await fetch(`${API_BASE}/v1/studies/${studyId}/analysis`, { cache: "no-store" });
         if (!ignore) {
           setAnalysis(analysisResponse.ok ? (await analysisResponse.json()) as StudyAnalysisResponse : null);
         }
+        void fetchModelScores(studyId)
+          .then((scores) => { if (!ignore) setModelScores(scores); })
+          .catch((cause: unknown) => {
+            if (!ignore) setScoreError(cause instanceof Error ? cause.message : "Skor model tidak tersedia.");
+          });
       } catch (cause) {
         if (!ignore) {
           setError(cause instanceof Error ? cause.message : "Tidak dapat memuat studi.");
@@ -121,7 +149,23 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
             </section>
             <aside className="review-panel">
               <p className="eyebrow">ANALYSIS & REVIEW</p>
-              <h2>Temuan model</h2>
+              <h2>Skor model (riset)</h2>
+              {modelScores ? (() => {
+                const topSlice = modelScores.slices.reduce((best, current) =>
+                  current.class_1_score > best.class_1_score ? current : best,
+                );
+                return <article className="finding-card">
+                  <h3>Skor label 1 tertinggi</h3>
+                  <p>{(topSlice.class_1_score * 100).toFixed(1)}% · irisan #{topSlice.index + 1}</p>
+                  <button className="evidence-link" type="button" onClick={() => setIndex(topSlice.index)}>Lihat irisan skor tertinggi</button>
+                  <p className="muted-copy">Kelas 1 mengikuti label dataset; maknanya belum terkonfirmasi. Skor tidak terkalibrasi dan bukan diagnosis.</p>
+                  <p className="muted-copy">{modelScores.model_id} · {modelScores.device} · checkpoint {modelScores.checkpoint_sha256.slice(0, 12)}</p>
+                </article>;
+              })() : <div className="notice notice-warning" role="status">
+                <strong>{scoreError ? "Inference belum tersedia." : "Menjalankan inference lokal…"}</strong>
+                {scoreError && <><br />{scoreError}</>}
+              </div>}
+              <h3>Temuan tersimpan</h3>
               {reviewError && <div className="notice notice-error" role="alert">{reviewError}</div>}
               {analysis?.findings.length ? analysis.findings.map((finding) => <article className="finding-card" key={finding.finding_id}>
                 <h3>Dugaan perdarahan intrakranial</h3>
@@ -134,7 +178,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                 <select id={`review-${finding.finding_id}`} value={finding.review_status} onChange={(event) => void recordReview(finding.finding_id, event.target.value as FindingReviewStatus)}>
                   <option value="pending" disabled>Menunggu review</option><option value="accepted">Terima</option><option value="rejected">Tolak</option><option value="uncertain">Tidak pasti</option>
                 </select>
-              </article>) : <div className="notice notice-warning" role="status"><strong>{analysis ? "Analisis selesai tanpa temuan." : "Inference belum tersedia."}</strong><br />{analysis ? "Model tidak melaporkan temuan untuk ditinjau." : "Belum ada baseline model yang disiapkan untuk lingkungan ini. Tidak ada temuan yang dibuat atau disimulasikan."}</div>}
+              </article>) : <div className="notice notice-warning" role="status">{analysis ? "Analisis selesai tanpa temuan tersimpan." : "Belum ada temuan terstruktur yang tersimpan."}</div>}
               <p className="muted-copy">Semua skor model bersifat eksperimental dan tidak terkalibrasi. Hasil memerlukan peninjauan manusia.</p>
               {analysis && <p className="muted-copy">Model: {analysis.model_version.provider} · {analysis.model_version.model_id} · {analysis.model_version.prompt_version}</p>}
               <dl className="study-metadata"><div><dt>Status pipeline</dt><dd>{study.status}</dd></div><div><dt>Provider</dt><dd>{analysis?.model_version.provider ?? "Belum dikonfigurasi"}</dd></div><div><dt>Review</dt><dd>{analysis?.findings.filter((finding) => finding.review_status === "pending").length ?? 0} menunggu</dd></div></dl>
@@ -146,3 +190,4 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
     </div>
   );
 }
+

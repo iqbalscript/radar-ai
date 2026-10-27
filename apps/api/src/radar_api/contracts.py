@@ -71,6 +71,24 @@ class StudyAnalysisResponse(ContractModel):
     model_version: ModelVersion
 
 
+class StudySliceScore(ContractModel):
+    slice_id: UUID
+    index: int = Field(ge=0)
+    class_0_score: float = Field(ge=0, le=1)
+    class_1_score: float = Field(ge=0, le=1)
+
+
+class StudyModelScores(ContractModel):
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    study_id: UUID
+    model_id: str = Field(min_length=1)
+    checkpoint_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    device: str = Field(min_length=1)
+    score_semantics: Literal["Uncalibrated binary class scores; not a diagnosis"]
+    class_1_label_semantics: Literal["Unspecified by dataset metadata"]
+    slices: list[StudySliceScore] = Field(min_length=1)
+
+
 class FindingReviewRequest(ContractModel):
     review_status: Literal["accepted", "rejected", "uncertain"]
 
@@ -82,3 +100,4 @@ class FindingReviewEvent(ContractModel):
     review_status: Literal["accepted", "rejected", "uncertain"]
     reviewer: str
     created_at: datetime
+

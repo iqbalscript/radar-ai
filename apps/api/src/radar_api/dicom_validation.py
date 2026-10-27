@@ -118,7 +118,7 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
         if not isinstance(dataset, FileDataset) or not dataset.file_meta:
             raise DicomValidationError("Upload must be a DICOM Part 10 image")
 
-        if str(getattr(dataset, "Modality", "")).upper() != "CT":
+        if str(getattr(dataset, "Modality", "")).strip().upper() != "CT":
             raise DicomValidationError("Only CT images are accepted")
         sop_class_uid = _required_uid(dataset, "SOPClassUID")
         if sop_class_uid not in CT_STORAGE_CLASSES:
@@ -197,3 +197,4 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
         RuntimeError,
     ) as error:
         raise DicomValidationError("DICOM file is corrupted or cannot be decoded") from error
+
