@@ -31,10 +31,11 @@ export default function SystemStatusPage() {
         <div className="notice" role="status" aria-live="polite">{detail}</div>
       </section>
       <section className="queue-panel system-panel">
-        <p className="eyebrow">MODEL & CONTRACT</p><h2>Inference belum dikonfigurasi</h2>
-        <p className="muted-copy">Kontrak respons v1.0.0 tersedia. Belum ada checkpoint CT yang tervalidasi atau akses model inference yang dikonfigurasi, jadi aplikasi tidak menampilkan temuan sintetis sebagai hasil model.</p>
-        <dl className="study-metadata"><div><dt>Kontrak API</dt><dd>v1.0.0</dd></div><div><dt>Provider model</dt><dd>Tidak aktif</dd></div><div><dt>Meta API smoke check</dt><dd>Belum dijalankan · perlu MODEL_API_KEY lokal</dd></div><div><dt>Kegunaan</dt><dd>Riset saja</dd></div></dl>
+        <p className="eyebrow">MODEL & CONTRACT</p><h2>Inference lokal per studi</h2>
+        <p className="muted-copy">Viewer meminta skor dari checkpoint DenseNet121 lokal saat studi dibuka. Halaman ini tidak memeriksa checkpoint. Baseline saat ini hanya mengeluarkan skor biner per irisan; arti label 0/1 belum terverifikasi, jadi skor tidak diubah menjadi temuan medis.</p>
+        <dl className="study-metadata"><div><dt>Kontrak API</dt><dd>v1.0.0</dd></div><div><dt>Provider model</dt><dd>Checkpoint lokal, status per lingkungan</dd></div><div><dt>Label checkpoint</dt><dd>Biner 0/1 · arti klinis belum diverifikasi</dd></div><div><dt>Kegunaan</dt><dd>Riset saja</dd></div></dl>
       </section>
     </div>
   );
 }
+
