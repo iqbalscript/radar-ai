@@ -23,6 +23,9 @@ class ValidatedDicom:
     slice_position: float | None
     z_position_mm: float | None
     orientation: tuple[float, ...] | None
+    instance_number: int | None
+    rows: int
+    columns: int
 
 
 IDENTIFYING_KEYWORDS = frozenset(
@@ -200,11 +203,13 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
         study_uid = str(getattr(dataset, "StudyInstanceUID", "")).strip()
         series_uid = str(getattr(dataset, "SeriesInstanceUID", "")).strip()
         sop_uid = dataset_sop_instance or media_sop_instance
-        if bool(study_uid) != bool(series_uid):
-            raise DicomValidationError("DICOM series identifiers are incomplete")
         for value in (study_uid, series_uid, sop_uid):
             if value and not UID(value).is_valid:
-                raise DicomValidationError("DICOM series identifiers are invalid")
+                raise DicomValidationError(
+                    "DICOM Study/Series/SOP identifiers are malformed. Use one CT series "
+                    "with valid, consistent DICOM identifiers, or anonymize it without "
+                    "rewriting those identifiers as non-DICOM text."
+                )
         study_uid = study_uid or None
         series_uid = series_uid or None
         sop_uid = sop_uid or None
@@ -242,6 +247,14 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
             orientation = None
             slice_position = None
             z_position_mm = None
+        try:
+            instance_number = (
+                int(str(dataset.InstanceNumber).strip())
+                if _has_value(getattr(dataset, "InstanceNumber", None))
+                else None
+            )
+        except (TypeError, ValueError) as error:
+            raise DicomValidationError("DICOM instance number is invalid") from error
         return ValidatedDicom(
             study_instance_uid=study_uid,
             series_instance_uid=series_uid,
@@ -249,6 +262,9 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
             slice_position=slice_position,
             z_position_mm=z_position_mm,
             orientation=orientation,
+            instance_number=instance_number,
+            rows=rows,
+            columns=columns,
         )
     except DicomValidationError:
         raise

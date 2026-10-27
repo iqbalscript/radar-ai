@@ -168,7 +168,7 @@ export default function DashboardPage() {
         <div>
           <p className="eyebrow">PRIVATE INGESTION</p>
           <h2 id="upload-title">Unggah DICOM CT</h2>
-          <p>Pilih irisan DICOM CT yang sudah dianonimkan. File tanpa metadata posisi dan seri hanya dapat diunggah satu per studi.</p>
+          <p>Pilih irisan dari satu seri DICOM CT yang sudah dianonimkan. Untuk banyak irisan, sistem mengurutkan dari posisi fisik; jika metadata posisi tidak tersedia, setiap irisan harus memiliki nomor Instance Number yang unik.</p>
         </div>
         <form className="upload-form" onSubmit={uploadSeries}>
           <label htmlFor="dicom-files">File CT</label>

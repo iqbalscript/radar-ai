@@ -113,6 +113,7 @@ def _read_hu_volume(paths: tuple[str, ...]) -> tuple[np.ndarray, int, int]:
     estimated_bytes = 0
     expected_orientation: tuple[float, ...] | None = None
     expected_position: float | None = None
+    geometry_state: bool | None = None
     for path_value in paths:
         try:
             dataset = dcmread(path_value, force=False)
@@ -122,19 +123,31 @@ def _read_hu_volume(paths: tuple[str, ...]) -> tuple[np.ndarray, int, int]:
             if int(getattr(dataset, "NumberOfFrames", 1)) != 1:
                 raise LocalizationInputError("SAMIHS supports single-frame CT slices only")
             if len(paths) > 1:
-                orientation = tuple(float(value) for value in dataset.ImageOrientationPatient)
-                position = tuple(float(value) for value in dataset.ImagePositionPatient)
-                if len(orientation) != 6 or len(position) != 3:
+                has_position = "ImagePositionPatient" in dataset
+                has_orientation = "ImageOrientationPatient" in dataset
+                if has_position != has_orientation:
                     raise LocalizationInputError("CT slice geometry is incomplete")
-                if expected_orientation is None:
-                    expected_orientation = orientation
-                elif not np.allclose(orientation, expected_orientation, atol=1e-4, rtol=0):
-                    raise LocalizationInputError("CT slices do not share one image orientation")
-                normal = np.cross(orientation[:3], orientation[3:])
-                projected_position = float(np.dot(position, normal))
-                if expected_position is not None and projected_position <= expected_position:
-                    raise LocalizationInputError("CT slices are not in increasing physical order")
-                expected_position = projected_position
+                has_geometry = has_position and has_orientation
+                if geometry_state is None:
+                    geometry_state = has_geometry
+                elif geometry_state != has_geometry:
+                    raise LocalizationInputError("CT slice geometry is incomplete")
+                if has_geometry:
+                    orientation = tuple(float(value) for value in dataset.ImageOrientationPatient)
+                    position = tuple(float(value) for value in dataset.ImagePositionPatient)
+                    if len(orientation) != 6 or len(position) != 3:
+                        raise LocalizationInputError("CT slice geometry is incomplete")
+                    if expected_orientation is None:
+                        expected_orientation = orientation
+                    elif not np.allclose(orientation, expected_orientation, atol=1e-4, rtol=0):
+                        raise LocalizationInputError("CT slices do not share one image orientation")
+                    normal = np.cross(orientation[:3], orientation[3:])
+                    projected_position = float(np.dot(position, normal))
+                    if expected_position is not None and projected_position <= expected_position:
+                        raise LocalizationInputError(
+                            "CT slices are not in increasing physical order"
+                        )
+                    expected_position = projected_position
 
             pixels = dataset.pixel_array
             if pixels.ndim != 2 or pixels.size == 0:
