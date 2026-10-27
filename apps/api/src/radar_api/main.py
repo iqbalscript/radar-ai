@@ -3,6 +3,7 @@ from math import isclose
 from uuid import UUID, uuid4
 
 import numpy as np
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -51,6 +52,8 @@ from radar_api.security import (
     require_authenticated_principal,
 )
 from radar_api.storage import PrivateImageStore
+
+load_dotenv()
 
 # Guard against Pillow decompression bombs on malformed images.
 Image.MAX_IMAGE_PIXELS = 16_777_216

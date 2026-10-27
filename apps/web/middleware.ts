@@ -5,6 +5,7 @@ const WINDOW_MS = 60_000;
 const MAX_API_REQUESTS_PER_WINDOW = 60;
 const MAX_PAGE_REQUESTS_PER_WINDOW = 180;
 const MAX_TRACKED_IPS = 2048;
+const SESSION_COOKIE_NAME = "radar_auth_session";
 
 const ipBuckets = new Map<string, number[]>();
 
@@ -121,6 +122,25 @@ export function middleware(request: NextRequest) {
     return applySecurityHeaders(throttled);
   }
 
+  const isPublicAuthRoute = pathname.startsWith("/api/auth/");
+  const isLoginPage = pathname === "/login";
+  const hasSessionCookie = request.cookies.has(SESSION_COOKIE_NAME);
+
+  // If already authenticated and visiting /login, redirect to /
+  if (isLoginPage && hasSessionCookie) {
+    const destination = request.nextUrl.searchParams.get("redirect") || "/";
+    return applySecurityHeaders(NextResponse.redirect(new URL(destination, request.url)));
+  }
+
+  // If unauthenticated and accessing protected application pages, force redirect to /login
+  if (!isApiRoute && !isPublicAuthRoute && !isLoginPage && !hasSessionCookie) {
+    const loginUrl = new URL("/login", request.url);
+    if (pathname !== "/") {
+      loginUrl.searchParams.set("redirect", pathname);
+    }
+    return applySecurityHeaders(NextResponse.redirect(loginUrl));
+  }
+
   const response = NextResponse.next();
   response.headers.set("X-RateLimit-Limit", String(limit));
   response.headers.set("X-RateLimit-Remaining", String(rate.remaining));
@@ -131,4 +151,3 @@ export function middleware(request: NextRequest) {
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico|fixtures/).*)"],
 };
-

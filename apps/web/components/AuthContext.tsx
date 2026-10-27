@@ -1,5 +1,6 @@
 "use client";
 
+import { usePathname, useRouter } from "next/navigation";
 import {
   createContext,
   useCallback,
@@ -14,6 +15,7 @@ import {
   isWebAuthRequired,
   loadStoredSession,
   refreshFirebaseSession,
+  signInWithDevAccount,
   signInWithEmailPassword,
   signInWithGooglePopup,
   signOutFirebase,
@@ -27,12 +29,15 @@ interface AuthContextValue {
   authRequired: boolean;
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
+  signInWithDev: (email?: string, name?: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const router = useRouter();
+  const pathname = usePathname();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
   const firebaseConfigured = isFirebaseConfigured();
@@ -75,10 +80,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(signedIn);
   }, []);
 
+  const signInWithDev = useCallback(async (email?: string, name?: string) => {
+    const signedIn = await signInWithDevAccount(email, name);
+    setUser(signedIn);
+  }, []);
+
   const signOut = useCallback(async () => {
     await signOutFirebase();
     setUser(null);
-  }, []);
+    router.push("/login");
+  }, [router]);
+
+  // Client-side route protection:
+  useEffect(() => {
+    if (loading) return;
+    const isLoginPage = pathname === "/login";
+    const isPublic = pathname.startsWith("/api/auth/");
+
+    if (!user && !isLoginPage && !isPublic) {
+      const redirectUrl =
+        pathname === "/"
+          ? "/login"
+          : `/login?redirect=${encodeURIComponent(pathname)}`;
+      router.replace(redirectUrl);
+    } else if (user && isLoginPage) {
+      if (typeof window !== "undefined") {
+        const params = new URLSearchParams(window.location.search);
+        const destination = params.get("redirect") || "/";
+        router.replace(destination);
+      } else {
+        router.replace("/");
+      }
+    }
+  }, [user, loading, pathname, router]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -88,6 +122,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authRequired,
       signInWithGoogle,
       signInWithEmail,
+      signInWithDev,
       signOut,
     }),
     [
@@ -97,6 +132,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authRequired,
       signInWithGoogle,
       signInWithEmail,
+      signInWithDev,
       signOut,
     ]
   );
@@ -111,4 +147,3 @@ export function useAuth(): AuthContextValue {
   }
   return ctx;
 }
-

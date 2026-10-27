@@ -14,7 +14,7 @@ export interface AuthUser {
   idToken: string;
   refreshToken: string;
   expiresAt: number;
-  provider: "google.com" | "password";
+  provider: "google.com" | "password" | "dev_mode";
 }
 
 export interface FirebaseClientConfig {
@@ -380,4 +380,45 @@ export async function signOutFirebase(): Promise<void> {
   saveStoredSession(null);
   await syncServerCookie(null);
 }
+
+function base64UrlEncode(text: string): string {
+  if (typeof window === "undefined") {
+    return Buffer.from(text).toString("base64url");
+  }
+  return btoa(text).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+export async function signInWithDevAccount(
+  email = "researcher@radar-ai.local",
+  name = "Peneliti Riset RADAR AI"
+): Promise<AuthUser> {
+  const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payload = base64UrlEncode(
+    JSON.stringify({
+      sub: "local-dev-researcher",
+      email,
+      name,
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 86400,
+    })
+  );
+  const sig = base64UrlEncode("radar-local-dev-signature");
+  const dummyJwt = `${header}.${payload}.${sig}`;
+
+  const user: AuthUser = {
+    uid: "local-dev-researcher",
+    email,
+    displayName: name,
+    photoUrl: null,
+    emailVerified: true,
+    idToken: dummyJwt,
+    refreshToken: "dev-refresh-token",
+    expiresAt: Date.now() + 86400 * 1000,
+    provider: "dev_mode",
+  };
+  saveStoredSession(user);
+  await syncServerCookie(user.idToken);
+  return user;
+}
+
 
