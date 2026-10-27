@@ -81,12 +81,14 @@ export default function DashboardPage() {
       if (!uploaded.ok) {
         const detail = (await uploaded.json().catch(() => ({}))) as { detail?: string };
         const message = detail.detail === "Only CT images are accepted"
-          ? "Tag DICOM Modality (0008,0060) tidak terbaca sebagai CT. File harus DICOM CT asli, bukan gambar hasil ekspor/screenshot."
+          ? "Tag DICOM Modality (0008,0060) menyatakan modalitas selain CT. Jika tag ini kosong, jenis CT diperiksa dari SOP Class UID."
           : detail.detail ?? `Upload gagal (${uploaded.status}).`;
         throw new Error(message);
       }
       createdStudyId = null;
-      setMessage("Seri CT tervalidasi dan tersimpan di penyimpanan privat.");
+      setMessage(files.length === 1
+        ? "Irisan DICOM CT tersimpan sebagai studi satu irisan di penyimpanan privat."
+        : "Seri CT tervalidasi dan tersimpan di penyimpanan privat.");
       if (fileInput.current) fileInput.current.value = "";
       await refresh();
     } catch (cause) {
@@ -113,17 +115,17 @@ export default function DashboardPage() {
       <section className="upload-panel" aria-labelledby="upload-title">
         <div>
           <p className="eyebrow">PRIVATE INGESTION</p>
-          <h2 id="upload-title">Unggah seri DICOM</h2>
-          <p>Pilih file DICOM dari satu seri CT yang sudah dianonimkan.</p>
+          <h2 id="upload-title">Unggah DICOM CT</h2>
+          <p>Pilih irisan DICOM CT yang sudah dianonimkan. File tanpa metadata posisi dan seri hanya dapat diunggah satu per studi.</p>
         </div>
         <form className="upload-form" onSubmit={uploadSeries}>
-          <label htmlFor="dicom-files">File seri CT</label>
+          <label htmlFor="dicom-files">File CT</label>
           <input ref={fileInput} id="dicom-files" type="file" accept=".dcm,application/dicom" multiple required />
           <button className="button-primary" type="submit" disabled={uploading}>
             {uploading ? "Mengunggah…" : "Validasi dan unggah"}
           </button>
         </form>
-        <p className="upload-note">Pilih semua irisan dari satu seri DICOM CT yang sudah dianonimkan. Tag Modality harus bernilai CT. Batas ukuran dan jumlah file mengikuti konfigurasi server; gambar disimpan di penyimpanan privat.</p>
+        <p className="upload-note">Tag Modality boleh kosong jika SOP Class UID mengidentifikasi CT. Untuk seri multi-irisan, pilih satu seri yang memiliki metadata Study/Series UID dan posisi irisan. Batas ukuran dan jumlah file mengikuti konfigurasi server; gambar disimpan di penyimpanan privat.</p>
       </section>
 
       <section className="queue-panel" aria-labelledby="queue-title">
@@ -142,5 +144,6 @@ export default function DashboardPage() {
     </div>
   );
 }
+
 
 
