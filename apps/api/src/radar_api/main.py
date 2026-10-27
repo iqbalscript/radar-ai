@@ -605,17 +605,13 @@ async def upload_dicom_series(
                 for orientation in orientations[1:]
             ):
                 raise DicomValidationError("DICOM series image orientations do not match")
-        if all(has_geometry) and len(
-            {round(item.slice_position, 4) for item in validated if item.slice_position is not None}
-        ) != len(validated):
-            raise DicomValidationError("DICOM series contains duplicate slice positions")
-
         ordered = sorted(
             zip(staged, validated, strict=True),
             key=lambda item: (
-                item[1].slice_position
-                if item[1].slice_position is not None
-                else float(item[1].instance_number or 0)
+                item[1].slice_position if item[1].slice_position is not None else float(
+                    item[1].instance_number or 0
+                ),
+                item[1].sop_instance_uid or item[0].sha256,
             ),
         )
         for index, (upload, metadata) in enumerate(ordered):

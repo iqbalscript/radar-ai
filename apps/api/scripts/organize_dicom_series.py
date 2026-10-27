@@ -9,7 +9,8 @@ import os
 import re
 import shutil
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,7 +61,13 @@ def _read_slice(path: Path, source: Path) -> Slice:
         modality = str(getattr(dataset, "Modality", "")).strip().upper()
         if modality != "CT":
             raise SortError("file is not tagged as CT")
-        sop_class = str(getattr(dataset, "SOPClassUID", "")).strip()
+        dataset_sop_class = str(getattr(dataset, "SOPClassUID", "")).strip()
+        media_sop_class = str(
+            getattr(dataset.file_meta, "MediaStorageSOPClassUID", "")
+        ).strip()
+        if dataset_sop_class and media_sop_class and dataset_sop_class != media_sop_class:
+            raise SortError("dataset and file-meta SOP classes do not match")
+        sop_class = dataset_sop_class or media_sop_class
         if sop_class not in CT_STORAGE_CLASSES:
             raise SortError("unsupported CT storage class")
         if int(getattr(dataset, "NumberOfFrames", 1)) != 1:
@@ -159,9 +166,10 @@ def _order_group(slices: list[Slice]) -> list[Slice]:
             for item in slices[1:]
         ):
             raise SortError("inconsistent image orientation")
-        if len({round(item.position or 0.0, 4) for item in slices}) != len(slices):
-            raise SortError("duplicate physical slice positions")
-        return sorted(slices, key=lambda item: item.position or 0.0)
+        return sorted(
+            slices,
+            key=lambda item: (item.position or 0.0, item.sop_id),
+        )
 
     if len(slices) == 1:
         return slices
@@ -169,7 +177,17 @@ def _order_group(slices: list[Slice]) -> list[Slice]:
     numbers = [item.instance_number for item in slices]
     if any(number is None for number in numbers) or len(set(numbers)) != len(numbers):
         raise SortError("no complete geometry or unique Instance Number for ordering")
-    return sorted(slices, key=lambda item: item.instance_number or 0)
+    return sorted(
+        slices,
+        key=lambda item: (item.instance_number or 0, item.sop_id),
+    )
+
+
+def _read_path(path: Path, source: Path) -> tuple[Slice | None, str | None]:
+    try:
+        return _read_slice(path, source), None
+    except SortError as error:
+        return None, str(error)
 
 
 def main() -> int:
@@ -181,6 +199,11 @@ def main() -> int:
         choices=("hardlink", "copy"),
         default="hardlink",
         help="Hardlinks save disk space and require source/output on the same drive (default)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate grouping and ordering without creating output files",
     )
     args = parser.parse_args()
     source = args.input.expanduser().resolve()
@@ -203,12 +226,17 @@ def main() -> int:
 
     groups: dict[tuple[str, str, str], list[Slice]] = defaultdict(list)
     errors: list[tuple[Path, str]] = []
-    for path in paths:
-        try:
-            item = _read_slice(path, source)
-            groups[(item.split, item.study_id, item.series_id)].append(item)
-        except SortError as error:
-            errors.append((path, str(error)))
+    worker_count = min(16, os.cpu_count() or 8)
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        for path, (item, error) in zip(
+            paths,
+            executor.map(lambda current: _read_path(current, source), paths),
+            strict=True,
+        ):
+            if error:
+                errors.append((path, error))
+            elif item:
+                groups[(item.split, item.study_id, item.series_id)].append(item)
 
     ordered_groups: list[tuple[tuple[str, str, str], list[Slice]]] = []
     for key, items in sorted(groups.items()):
@@ -217,12 +245,23 @@ def main() -> int:
         except SortError as error:
             errors.extend((item.path, str(error)) for item in items)
     if errors:
+        reasons = Counter(reason for _, reason in errors)
+        reason_summary = "; ".join(
+            f"{reason}: {count}" for reason, count in sorted(reasons.items())
+        )
         print(
             f"Found {len(errors)} files in invalid/incomplete groups; no output was written. "
-            "Check DICOM metadata and rerun after fixing the source set.",
+            f"Reasons: {reason_summary}",
             file=sys.stderr,
         )
         return 2
+
+    if args.dry_run:
+        print(
+            f"Dry run passed: {len(paths)} DICOM files form {len(ordered_groups)} "
+            "orderable CT series. No output was written."
+        )
+        return 0
 
     output.mkdir(parents=True)
     study_numbers: dict[tuple[str, str], int] = {}

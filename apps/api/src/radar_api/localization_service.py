@@ -143,9 +143,11 @@ def _read_hu_volume(paths: tuple[str, ...]) -> tuple[np.ndarray, int, int]:
                         raise LocalizationInputError("CT slices do not share one image orientation")
                     normal = np.cross(orientation[:3], orientation[3:])
                     projected_position = float(np.dot(position, normal))
-                    if expected_position is not None and projected_position <= expected_position:
+                    if expected_position is not None and projected_position < (
+                        expected_position - 1e-4
+                    ):
                         raise LocalizationInputError(
-                            "CT slices are not in increasing physical order"
+                            "CT slices are not in non-decreasing physical order"
                         )
                     expected_position = projected_position
 
