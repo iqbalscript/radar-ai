@@ -43,3 +43,22 @@ export interface StudyAnalysisResponse {
   findings: Finding[];
   model_version: ModelVersion;
 }
+
+export interface StudySliceScore {
+  slice_id: string;
+  index: number;
+  class_0_score: number;
+  class_1_score: number;
+}
+
+export interface StudyModelScores {
+  schema_version: "1.0.0";
+  study_id: string;
+  model_id: string;
+  checkpoint_sha256: string;
+  device: string;
+  score_semantics: "Uncalibrated binary class scores; not a diagnosis";
+  class_1_label_semantics: "Unspecified by dataset metadata";
+  slices: StudySliceScore[];
+}
+

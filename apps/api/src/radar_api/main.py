@@ -19,10 +19,17 @@ from radar_api.contracts import (
     FindingReviewRequest,
     Study,
     StudyAnalysisResponse,
+    StudyModelScores,
+    StudySliceScore,
 )
 from radar_api.database import get_session
 from radar_api.dicom_upload import UploadLimits, UploadTooLarge, stage_upload
 from radar_api.dicom_validation import DicomValidationError, validate_ct_slice
+from radar_api.inference_service import (
+    ModelUnavailableError,
+    StudyScoringError,
+    score_local_checkpoint,
+)
 from radar_api.models import (
     ImageAssetRecord,
     PersistedFindingRecord,
@@ -49,7 +56,7 @@ app.add_middleware(
         if origin.strip()
     ],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["DELETE", "GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 
@@ -106,6 +113,27 @@ def get_study(study_id: UUID, session: Session = Depends(get_session)) -> StudyR
     if study is None:
         raise HTTPException(status_code=404, detail="Study not found")
     return study
+
+
+@app.delete("/v1/studies/{study_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["studies"])
+def delete_empty_study(study_id: UUID, session: Session = Depends(get_session)) -> Response:
+    """Remove only an empty study record created by an upload that did not complete."""
+
+    study = session.scalar(
+        select(StudyRecord)
+        .where(StudyRecord.study_id == study_id)
+        .options(selectinload(StudyRecord.slices))
+    )
+    if study is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    if study.slices:
+        raise HTTPException(
+            status_code=409,
+            detail="A study with uploaded slices cannot be deleted",
+        )
+    session.delete(study)
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get(
@@ -173,6 +201,67 @@ def get_study_analysis(study_id: UUID, session: Session = Depends(get_session)) 
             for item in findings
         ],
         "model_version": model_version,
+    }
+
+
+@app.get(
+    "/v1/studies/{study_id}/scores",
+    response_model=StudyModelScores,
+    tags=["analysis"],
+)
+def get_study_model_scores(
+    study_id: UUID,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    """Run the configured local binary checkpoint and return uncalibrated slice scores."""
+
+    study = session.scalar(
+        select(StudyRecord)
+        .where(StudyRecord.study_id == study_id)
+        .options(selectinload(StudyRecord.slices).selectinload(StudySliceRecord.image_asset))
+    )
+    if study is None:
+        raise HTTPException(status_code=404, detail="Study not found")
+    if not study.slices:
+        raise HTTPException(status_code=409, detail="Upload a CT series before requesting scores")
+
+    store = PrivateImageStore()
+    paths = [store.path_for(item.image_asset.storage_key) for item in study.slices]
+    try:
+        result = score_local_checkpoint(paths)
+    except ModelUnavailableError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Local CT model unavailable. Configure RADAR_CT_CHECKPOINT and restart the API."
+            ),
+        ) from error
+    except StudyScoringError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="Stored CT slices could not be scored by the configured model.",
+        ) from error
+
+    slice_scores = []
+    for image_slice, model_score in zip(study.slices, result["slices"], strict=True):
+        scores = model_score["scores"]
+        slice_scores.append(
+            StudySliceScore(
+                slice_id=image_slice.slice_id,
+                index=image_slice.index,
+                class_0_score=float(scores["0"]),
+                class_1_score=float(scores["1"]),
+            )
+        )
+    return {
+        "schema_version": "1.0.0",
+        "study_id": study.study_id,
+        "model_id": result["model_id"],
+        "checkpoint_sha256": result["checkpoint_sha256"],
+        "device": result["device"],
+        "score_semantics": "Uncalibrated binary class scores; not a diagnosis",
+        "class_1_label_semantics": "Unspecified by dataset metadata",
+        "slices": slice_scores,
     }
 
 
@@ -414,3 +503,4 @@ async def upload_dicom_series(
             item.path.unlink(missing_ok=True)
         for upload in files:
             await upload.close()
+

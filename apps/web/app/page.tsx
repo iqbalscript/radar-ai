@@ -62,6 +62,7 @@ export default function DashboardPage() {
     setUploading(true);
     setMessage("");
     setError("");
+    let createdStudyId: string | null = null;
     try {
       const created = await fetch(`${API_BASE}/v1/studies`, {
         method: "POST",
@@ -70,6 +71,7 @@ export default function DashboardPage() {
       });
       if (!created.ok) throw new Error("Gagal membuat catatan studi.");
       const study = (await created.json()) as Study;
+      createdStudyId = study.study_id;
       const body = new FormData();
       Array.from(files).forEach((file) => body.append("files", file));
       const uploaded = await fetch(`${API_BASE}/v1/studies/${study.study_id}/dicom`, {
@@ -78,12 +80,19 @@ export default function DashboardPage() {
       });
       if (!uploaded.ok) {
         const detail = (await uploaded.json().catch(() => ({}))) as { detail?: string };
-        throw new Error(detail.detail ?? `Upload gagal (${uploaded.status}).`);
+        const message = detail.detail === "Only CT images are accepted"
+          ? "Tag DICOM Modality (0008,0060) tidak terbaca sebagai CT. File harus DICOM CT asli, bukan gambar hasil ekspor/screenshot."
+          : detail.detail ?? `Upload gagal (${uploaded.status}).`;
+        throw new Error(message);
       }
+      createdStudyId = null;
       setMessage("Seri CT tervalidasi dan tersimpan di penyimpanan privat.");
       if (fileInput.current) fileInput.current.value = "";
       await refresh();
     } catch (cause) {
+      if (createdStudyId) {
+        await fetch(`${API_BASE}/v1/studies/${createdStudyId}`, { method: "DELETE" }).catch(() => undefined);
+      }
       setError(cause instanceof Error ? cause.message : "Upload gagal.");
     } finally {
       setUploading(false);
@@ -109,12 +118,12 @@ export default function DashboardPage() {
         </div>
         <form className="upload-form" onSubmit={uploadSeries}>
           <label htmlFor="dicom-files">File seri CT</label>
-          <input ref={fileInput} id="dicom-files" type="file" multiple required />
+          <input ref={fileInput} id="dicom-files" type="file" accept=".dcm,application/dicom" multiple required />
           <button className="button-primary" type="submit" disabled={uploading}>
             {uploading ? "Mengunggah…" : "Validasi dan unggah"}
           </button>
         </form>
-        <p className="upload-note">Batas ukuran dan jumlah file mengikuti konfigurasi server. Nama file diabaikan; data gambar tidak disimpan di folder publik.</p>
+        <p className="upload-note">Pilih semua irisan dari satu seri DICOM CT yang sudah dianonimkan. Tag Modality harus bernilai CT. Batas ukuran dan jumlah file mengikuti konfigurasi server; gambar disimpan di penyimpanan privat.</p>
       </section>
 
       <section className="queue-panel" aria-labelledby="queue-title">
@@ -133,3 +142,5 @@ export default function DashboardPage() {
     </div>
   );
 }
+
+
