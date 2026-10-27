@@ -19,8 +19,9 @@ from torchvision.models import densenet121
 
 from radar_api.dicom_preprocessing import decode_and_window
 
-CHECKPOINT_SCHEMA = "radar-ai.densenet121-ich-checkpoint/v1"
-LABELS = (
+CHECKPOINT_SCHEMA = "radar-ai.densenet121-ct-checkpoint/v2"
+LEGACY_CHECKPOINT_SCHEMA = "radar-ai.densenet121-ich-checkpoint/v1"
+ICH_LABELS = (
     "any",
     "epidural",
     "intraparenchymal",
@@ -28,6 +29,7 @@ LABELS = (
     "subarachnoid",
     "subdural",
 )
+BINARY_LABELS = ("0", "1")
 IMAGE_SIZE = 224
 PREPROCESSING = {
     "dicom_window_center": 40.0,
@@ -43,7 +45,7 @@ class InferenceError(ValueError):
 
 
 def load_checkpoint(path: Path, *, device: str = "cuda") -> tuple[nn.Module, dict[str, Any], str]:
-    """Load a local six-label DenseNet121 checkpoint without network access.
+    """Load a local binary or six-label DenseNet121 checkpoint offline.
 
     The checkpoint must contain a trained classifier state dict plus provenance
     metadata. Strict state-dict loading prevents silently scoring random layers.
@@ -62,30 +64,39 @@ def load_checkpoint(path: Path, *, device: str = "cuda") -> tuple[nn.Module, dic
     state_dict = checkpoint.get("state_dict")
     if not isinstance(metadata, dict) or not isinstance(state_dict, dict):
         raise InferenceError("Checkpoint requires metadata and state_dict mappings")
-    if metadata.get("schema") != CHECKPOINT_SCHEMA:
+    labels = tuple(metadata.get("labels", ()))
+    schema = metadata.get("schema")
+    if schema == LEGACY_CHECKPOINT_SCHEMA:
+        if labels != ICH_LABELS:
+            raise InferenceError("Legacy checkpoint labels must use the documented RSNA order")
+    elif schema == CHECKPOINT_SCHEMA:
+        if labels not in (BINARY_LABELS, ICH_LABELS):
+            raise InferenceError("Checkpoint labels must be [0, 1] or the RSNA six-label order")
+    else:
         raise InferenceError(f"Checkpoint metadata schema must be {CHECKPOINT_SCHEMA}")
-    if tuple(metadata.get("labels", ())) != LABELS:
-        raise InferenceError("Checkpoint labels must use the documented RSNA six-label order")
     if metadata.get("preprocessing") != PREPROCESSING:
         raise InferenceError("Checkpoint preprocessing must match this runner's versioned contract")
     for key in ("model_id", "training_data", "weights_sha256"):
         if not isinstance(metadata.get(key), str) or not metadata[key].strip():
             raise InferenceError(f"Checkpoint metadata requires non-empty {key}")
     model = densenet121(weights=None)
-    model.classifier = nn.Linear(model.classifier.in_features, len(LABELS))
+    output_width = 1 if labels == BINARY_LABELS else len(ICH_LABELS)
+    model.classifier = nn.Linear(model.classifier.in_features, output_width)
     try:
         model.load_state_dict(state_dict, strict=True)
     except RuntimeError as error:
         raise InferenceError(
-            "Checkpoint state_dict does not match DenseNet121 with six outputs"
+            "Checkpoint state_dict does not match its DenseNet121 output contract"
         ) from error
+    model.radar_labels = labels
+    model.radar_binary = labels == BINARY_LABELS
     model.to(target).eval()
     digest = hashlib.sha256(checkpoint_bytes).hexdigest()
     return model, metadata, digest
 
 
-def _prepare_input(image: np.ndarray, *, device: torch.device) -> Tensor:
-    """Apply the documented grayscale-to-RGB ImageNet input adaptation."""
+def preprocess_ct_array(image: np.ndarray) -> Tensor:
+    """Convert a windowed CT array into one normalized 3×224×224 model tensor."""
     if image.ndim != 2 or image.size == 0 or not np.isfinite(image).all():
         raise InferenceError("Preprocessed CT image must be a finite, non-empty 2D array")
     grayscale = Image.fromarray(np.uint8(np.clip(image, 0.0, 1.0) * 255.0), mode="L")
@@ -94,7 +105,12 @@ def _prepare_input(image: np.ndarray, *, device: torch.device) -> Tensor:
     tensor = tensor.unsqueeze(0).repeat(3, 1, 1)
     mean = torch.tensor((0.485, 0.456, 0.406), dtype=tensor.dtype).view(3, 1, 1)
     std = torch.tensor((0.229, 0.224, 0.225), dtype=tensor.dtype).view(3, 1, 1)
-    return ((tensor - mean) / std).unsqueeze(0).to(device)
+    return (tensor - mean) / std
+
+
+def _prepare_input(image: np.ndarray, *, device: torch.device) -> Tensor:
+    """Apply model preprocessing and add a one-image batch dimension."""
+    return preprocess_ct_array(image).unsqueeze(0).to(device)
 
 
 def score_dicom_files(
@@ -121,11 +137,19 @@ def score_dicom_files(
             for path in paths:
                 image = decode_and_window(path, center=center, width=width)
                 logits = model(_prepare_input(image, device=target))
-                if logits.shape != (1, len(LABELS)):
-                    raise InferenceError("Model must return one logit for each of the six labels")
-                scores = torch.sigmoid(logits[0]).detach().cpu().tolist()
+                labels = tuple(getattr(model, "radar_labels", ICH_LABELS))
+                binary = bool(getattr(model, "radar_binary", False))
+                expected_width = 1 if binary else len(labels)
+                if logits.shape != (1, expected_width):
+                    raise InferenceError("Model output width does not match checkpoint labels")
+                probabilities = torch.sigmoid(logits[0]).detach().cpu().tolist()
+                scores = (
+                    [1.0 - probabilities[0], probabilities[0]]
+                    if binary
+                    else probabilities
+                )
                 outputs.append(
-                    {"file": path.name, "scores": dict(zip(LABELS, scores, strict=True))}
+                    {"file": path.name, "scores": dict(zip(labels, scores, strict=True))}
                 )
     except InferenceError:
         raise

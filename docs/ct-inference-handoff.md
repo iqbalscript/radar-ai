@@ -97,3 +97,49 @@ Dataset terms and the missing authorized local profile are tracked in
 [`rsna-ich-licensing-and-profile.md`](./rsna-ich-licensing-and-profile.md). This is a code handoff,
 not a claim that all acceptance criteria have passed. The prototype is **NOT FOR CLINICAL USE**.
 
+## Local binary dataset training
+
+For a local dataset that supplies binary per-slice labels in `bags_train.csv` and `bags_test.csv`,
+use `apps/api/scripts/train_ct_binary.py`. The script initializes DenseNet121 from torchvision's
+ImageNet1K_V1 weights, fine-tunes a one-logit classifier with weighted binary cross entropy, and
+uses the same 40/80 window and 224-pixel normalization as the inference runner. It splits internal
+validation by DICOM `PatientID`, aggregates maximum slice score by bag for study-level metrics, and
+removes any patient found on both the train and test lists from the test metrics. It writes the
+checkpoint and aggregate metrics under the ignored local `apps/api/data/model-artifacts/` directory.
+
+Example from `apps/api`:
+
+```powershell
+$env:PYTHONPATH = "src"
+python scripts/train_ct_binary.py `
+  --data-root "C:\Users\<user>\Downloads\radar-private" `
+  --device cuda `
+  --epochs 3 `
+  --batch-size 4
+```
+
+The local profile found 34,496 train slices and 5,254 test slices. The four CSVs map to the DICOM
+filenames; labels are binary 0/1 and `bag_label` equals the maximum instance label for each bag.
+There are 1,000 train bags and 150 test bags. Three patients occur in both official splits, so the
+script excludes those three test bags (109 slices) before reporting test metrics. Ten training
+slices failed pixel-data decoding and were counted and skipped; the source files were not changed.
+
+The initial one-epoch RTX 3050 run used the ImageNet1K_V1 DenseNet121 weights and a
+patient-grouped validation split. Its 0.5-threshold study accuracy was 0.497, so fine-tuning was
+continued for two epochs from that checkpoint with a lower learning rate. The best checkpoint was
+epoch 2 by validation study AUROC. On the patient-overlap-purged holdout (5,145 slices / 147 bags),
+it reached study AUROC 0.945. At a fixed 0.5 threshold, study accuracy was 0.701. Selecting a
+threshold of 0.9487 on the validation studies (90.4% validation accuracy) gave 0.864 test study
+accuracy, with 0.743 sensitivity and 0.974 specificity (52 TP, 18 FN, 75 TN, 2 FP). The test set
+was not used to choose the threshold. Slice-level test AUROC was 0.949 and slice accuracy at 0.5
+was 0.883. These are results from one small holdout evaluation, not a guarantee of performance or
+clinical validation. The sensitivity means this operating point missed 18 of 70 positive studies.
+A one-slice inference smoke run also loaded the checkpoint offline on CUDA and wrote a real model
+score locally.
+
+The checkpoint and per-fixture score JSON are in the ignored local `apps/api/data/model-artifacts/`
+folder and must not be committed or shared. This dataset profile is local workspace evidence, not a
+source or licensing determination. Confirm that label `1` has the intended meaning and check the
+dataset's own usage terms before interpreting or sharing results.
+
+

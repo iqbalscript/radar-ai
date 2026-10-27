@@ -6,6 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from pydicom.config import IGNORE, settings
+
 from radar_api.ct_inference import InferenceError, load_checkpoint, score_dicom_files, write_results
 
 
@@ -18,6 +20,8 @@ def main() -> int:
     parser.add_argument("--window-center", type=float, default=40.0)
     parser.add_argument("--window-width", type=float, default=80.0)
     args = parser.parse_args()
+    # Match the local training runner: this research source has nonconforming UI values.
+    settings.reading_validation_mode = IGNORE
 
     paths = sorted(args.input.glob("*.dcm")) if args.input.is_dir() else [args.input]
     if not paths or any(not path.is_file() for path in paths):
