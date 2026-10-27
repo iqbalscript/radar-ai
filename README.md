@@ -94,4 +94,5 @@ The project is an early research/demo prototype. Model outputs are experimental,
 The RSNA Brain CT Hemorrhage dataset licensing assessment, source metadata manifest, and outstanding local profiling dependency are documented in [`docs/rsna-ich-licensing-and-profile.md`](docs/rsna-ich-licensing-and-profile.md) and [`docs/rsna-ich-source-manifest.json`](docs/rsna-ich-source-manifest.json). Dataset files and patient-level metadata must remain outside this repository.
 The Sprint 1 preprocessing, grouped split-manifest, memory budget, and dependent-workstream handoff are documented in [`docs/dicom-preprocessing-handoff.md`](docs/dicom-preprocessing-handoff.md).
 The offline DenseNet121 checkpoint contract, inference command, current validation evidence, and data/model handoff are documented in [`docs/ct-inference-handoff.md`](docs/ct-inference-handoff.md).
+The optional pretrained SAMIHS hemorrhage mask localizer, one-time offline provisioning, viewer boxes, and validation limits are documented in [`docs/ich-localization-handoff.md`](docs/ich-localization-handoff.md). It uses existing weights only; it does not train or fine-tune.
 

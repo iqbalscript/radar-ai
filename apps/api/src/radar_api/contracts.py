@@ -91,6 +91,35 @@ class StudyModelScores(ContractModel):
     slices: list[StudySliceScore] = Field(min_length=1)
 
 
+class Box2D(ContractModel):
+    """Normalized bounding box around a pretrained segmentation mask."""
+
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+
+
+class SliceLocalization(ContractModel):
+    slice_id: UUID
+    index: int = Field(ge=0)
+    image_width: int = Field(gt=0)
+    image_height: int = Field(gt=0)
+    box: Box2D | None = None
+    mask_pixels: int = Field(ge=0)
+
+
+class StudyLocalizations(ContractModel):
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    study_id: UUID
+    model_id: str = Field(min_length=1)
+    checkpoint_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    device: str = Field(min_length=1)
+    threshold: float = Field(gt=0, lt=1)
+    score_semantics: Literal["SAMIHS binary ICH segmentation mask; research localization only"]
+    slices: list[SliceLocalization] = Field(min_length=1)
+
+
 class FindingReviewRequest(ContractModel):
     review_status: Literal["accepted", "rejected", "uncertain"]
 

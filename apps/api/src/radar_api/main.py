@@ -19,6 +19,7 @@ from radar_api.contracts import (
     FindingReviewRequest,
     Study,
     StudyAnalysisResponse,
+    StudyLocalizations,
     StudyModelScores,
     StudySliceScore,
 )
@@ -29,6 +30,11 @@ from radar_api.inference_service import (
     ModelUnavailableError,
     StudyScoringError,
     score_local_checkpoint,
+)
+from radar_api.localization_service import (
+    LocalizationInputError,
+    LocalizationUnavailableError,
+    localize_dicom_series,
 )
 from radar_api.models import (
     ImageAssetRecord,
@@ -264,6 +270,68 @@ def get_study_model_scores(
             "RSNA ICH slice label 1 means hemorrhage annotated present; research score only"
         ),
         "slices": slice_scores,
+    }
+
+
+@app.get(
+    "/v1/studies/{study_id}/localizations",
+    response_model=StudyLocalizations,
+    tags=["analysis"],
+)
+def get_study_localizations(
+    study_id: UUID,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    """Return real bounding boxes derived from the configured pretrained ICH mask model."""
+    study = session.scalar(
+        select(StudyRecord)
+        .where(StudyRecord.study_id == study_id)
+        .options(selectinload(StudyRecord.slices).selectinload(StudySliceRecord.image_asset))
+    )
+    if study is None:
+        raise HTTPException(status_code=404, detail="Study not found")
+    if not study.slices:
+        raise HTTPException(status_code=409, detail="Upload a CT series before localization")
+
+    store = PrivateImageStore()
+    paths = tuple(str(store.path_for(item.image_asset.storage_key)) for item in study.slices)
+    try:
+        result = localize_dicom_series(paths)
+    except LocalizationUnavailableError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Pretrained lesion localization is unavailable. Configure the local SAMIHS "
+                "model package and checkpoint, then restart the API."
+            ),
+        ) from error
+    except LocalizationInputError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="Stored CT series does not meet the localizer input requirements.",
+        ) from error
+
+    localized_slices = []
+    for image_slice, localization in zip(study.slices, result["slices"], strict=True):
+        localized_slices.append(
+            {
+                "slice_id": image_slice.slice_id,
+                "index": image_slice.index,
+                "image_width": localization["image_width"],
+                "image_height": localization["image_height"],
+                "box": localization["box"],
+                "mask_pixels": localization["mask_pixels"],
+            }
+        )
+    return {
+        "schema_version": "1.0.0",
+        "study_id": study.study_id,
+        "model_id": result["model_id"],
+        "checkpoint_sha256": result["checkpoint_sha256"],
+        "device": result["device"],
+        "threshold": result["threshold"],
+        "score_semantics": "SAMIHS binary ICH segmentation mask; research localization only",
+        "slices": localized_slices,
     }
 
 
