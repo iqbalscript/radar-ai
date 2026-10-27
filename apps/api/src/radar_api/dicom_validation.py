@@ -1,5 +1,6 @@
 """Validation for one anonymized, single-frame CT series."""
 
+import re
 from dataclasses import dataclass
 from math import isclose, sqrt
 from pathlib import Path
@@ -89,6 +90,7 @@ IDENTIFYING_KEYWORDS = frozenset(
     }
 )
 CT_STORAGE_CLASSES = {str(CTImageStorage), str(EnhancedCTImageStorage)}
+ANONYMIZED_IDENTIFIER_PATTERN = re.compile(r"ID_[0-9A-Fa-f]{8,12}\Z")
 
 
 def _required_uid(dataset: FileDataset, keyword: str) -> str:
@@ -104,6 +106,11 @@ def _has_value(value: object) -> bool:
     if isinstance(value, (list, tuple)):
         return any(_has_value(item) for item in value)
     return bool(str(value).strip())
+
+
+def _is_valid_instance_identifier(value: str) -> bool:
+    """Accept standard UIDs or the dataset's opaque, de-identified ID tokens."""
+    return UID(value).is_valid or ANONYMIZED_IDENTIFIER_PATTERN.fullmatch(value) is not None
 
 
 def _position_and_normal(
@@ -166,7 +173,7 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
                 and media_sop_instance != dataset_sop_instance
             )
             or any(
-                value and not UID(value).is_valid
+                value and not _is_valid_instance_identifier(value)
                 for value in (media_sop_instance, dataset_sop_instance)
             )
             or not transfer_syntax
@@ -204,11 +211,10 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
         series_uid = str(getattr(dataset, "SeriesInstanceUID", "")).strip()
         sop_uid = dataset_sop_instance or media_sop_instance
         for value in (study_uid, series_uid, sop_uid):
-            if value and not UID(value).is_valid:
+            if value and not _is_valid_instance_identifier(value):
                 raise DicomValidationError(
-                    "DICOM Study/Series/SOP identifiers are malformed. Use one CT series "
-                    "with valid, consistent DICOM identifiers, or anonymize it without "
-                    "rewriting those identifiers as non-DICOM text."
+                    "DICOM Study/Series/SOP identifiers are malformed. Use valid DICOM UIDs "
+                    "or consistent anonymized IDs in the ID_<hex> format."
                 )
         study_uid = study_uid or None
         series_uid = series_uid or None
