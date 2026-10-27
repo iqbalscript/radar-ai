@@ -55,7 +55,7 @@ def _split_for(path: Path, source: Path) -> str:
     return "all"
 
 
-def _read_slice(path: Path, source: Path) -> Slice:
+def _read_slice(path: Path, source: Path, *, repair_file_meta: bool = False) -> Slice:
     try:
         dataset = dcmread(path, stop_before_pixels=True, force=False)
         modality = str(getattr(dataset, "Modality", "")).strip().upper()
@@ -65,8 +65,10 @@ def _read_slice(path: Path, source: Path) -> Slice:
         media_sop_class = str(
             getattr(dataset.file_meta, "MediaStorageSOPClassUID", "")
         ).strip()
+        if not media_sop_class and not repair_file_meta:
+            raise SortError("missing file-meta Media Storage SOP Class UID")
         if dataset_sop_class and media_sop_class and dataset_sop_class != media_sop_class:
-            raise SortError("dataset and file-meta SOP classes do not match")
+            raise SortError("dataset and file-meta SOP Class UIDs do not match")
         sop_class = dataset_sop_class or media_sop_class
         if sop_class not in CT_STORAGE_CLASSES:
             raise SortError("unsupported CT storage class")
@@ -78,6 +80,14 @@ def _read_slice(path: Path, source: Path) -> Slice:
         sop_id = str(getattr(dataset, "SOPInstanceUID", "")).strip()
         if not all(_is_identifier(value) for value in (study_id, series_id, sop_id)):
             raise SortError("Study/Series/SOP identifier is missing or unsupported")
+        media_sop_id = str(
+            getattr(dataset.file_meta, "MediaStorageSOPInstanceUID", "")
+        ).strip()
+        if media_sop_id and media_sop_id != sop_id and not repair_file_meta:
+            raise SortError("dataset and file-meta SOP Instance UIDs do not match")
+        transfer_syntax = str(getattr(dataset.file_meta, "TransferSyntaxUID", "")).strip()
+        if not transfer_syntax or not UID(transfer_syntax).is_valid:
+            raise SortError("missing or invalid file-meta Transfer Syntax UID")
 
         rows, columns = int(dataset.Rows), int(dataset.Columns)
         if rows <= 0 or columns <= 0:
@@ -183,9 +193,11 @@ def _order_group(slices: list[Slice]) -> list[Slice]:
     )
 
 
-def _read_path(path: Path, source: Path) -> tuple[Slice | None, str | None]:
+def _read_path(
+    path: Path, source: Path, *, repair_file_meta: bool = False
+) -> tuple[Slice | None, str | None]:
     try:
-        return _read_slice(path, source), None
+        return _read_slice(path, source, repair_file_meta=repair_file_meta), None
     except SortError as error:
         return None, str(error)
 
@@ -201,6 +213,14 @@ def main() -> int:
         help="Hardlinks save disk space and require source/output on the same drive (default)",
     )
     parser.add_argument(
+        "--repair-file-meta",
+        action="store_true",
+        help=(
+            "When copying, make MediaStorageSOPClassUID and MediaStorageSOPInstanceUID "
+            "match the DICOM dataset; image pixels and patient tags are not changed"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate grouping and ordering without creating output files",
@@ -214,6 +234,8 @@ def main() -> int:
         parser.error("--output must be outside the input folder")
     if output.exists():
         parser.error("--output must not already exist")
+    if args.repair_file_meta and args.mode != "copy":
+        parser.error("--repair-file-meta requires --mode copy")
 
     # This dataset uses opaque ID_<hex> values in DICOM UI fields. They are only
     # read locally to group matching slices; they are never written to output.
@@ -230,7 +252,12 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         for path, (item, error) in zip(
             paths,
-            executor.map(lambda current: _read_path(current, source), paths),
+            executor.map(
+                lambda current: _read_path(
+                    current, source, repair_file_meta=args.repair_file_meta
+                ),
+                paths,
+            ),
             strict=True,
         ):
             if error:
@@ -285,7 +312,20 @@ def main() -> int:
                 output_name = f"slice_{index:04d}.dcm"
                 output_path = group_dir / output_name
                 if args.mode == "copy":
-                    shutil.copy2(item.path, output_path)
+                    if args.repair_file_meta:
+                        dataset = dcmread(item.path, force=False)
+                        sop_class = str(
+                            getattr(dataset, "SOPClassUID", "")
+                            or getattr(dataset.file_meta, "MediaStorageSOPClassUID", "")
+                        ).strip()
+                        if not sop_class:
+                            raise SortError("missing SOP Class UID during file-meta repair")
+                        dataset.file_meta.MediaStorageSOPClassUID = sop_class
+                        dataset.file_meta.MediaStorageSOPInstanceUID = dataset.SOPInstanceUID
+                        dataset.save_as(output_path, enforce_file_format=True)
+                        shutil.copystat(item.path, output_path)
+                    else:
+                        shutil.copy2(item.path, output_path)
                 else:
                     os.link(item.path, output_path)
                 rows.append(
