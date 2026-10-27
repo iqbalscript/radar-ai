@@ -155,10 +155,11 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                   current.class_1_score > best.class_1_score ? current : best,
                 );
                 return <article className="finding-card">
-                  <h3>Skor label 1 tertinggi</h3>
-                  <p>{(topSlice.class_1_score * 100).toFixed(1)}% · irisan #{topSlice.index + 1}</p>
+                  <h3>Skor classifier biner tertinggi</h3>
+                  <p>Label 1: {(topSlice.class_1_score * 100).toFixed(1)}% · irisan #{topSlice.index + 1}</p>
+                  <p className="muted-copy">Label 0: {(topSlice.class_0_score * 100).toFixed(1)}% · label 1: {(topSlice.class_1_score * 100).toFixed(1)}%</p>
                   <button className="evidence-link" type="button" onClick={() => setIndex(topSlice.index)}>Lihat irisan skor tertinggi</button>
-                  <p className="muted-copy">Kelas 1 mengikuti label dataset; maknanya belum terkonfirmasi. Skor tidak terkalibrasi dan bukan diagnosis.</p>
+                  <p className="muted-copy">Ini skor keluaran untuk irisan ini, bukan akurasi model. Arti klinis label 0/1 belum terkonfirmasi; skor tidak terkalibrasi dan bukan diagnosis.</p>
                   <p className="muted-copy">{modelScores.model_id} · {modelScores.device} · checkpoint {modelScores.checkpoint_sha256.slice(0, 12)}</p>
                 </article>;
               })() : <div className="notice notice-warning" role="status">
@@ -178,7 +179,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                 <select id={`review-${finding.finding_id}`} value={finding.review_status} onChange={(event) => void recordReview(finding.finding_id, event.target.value as FindingReviewStatus)}>
                   <option value="pending" disabled>Menunggu review</option><option value="accepted">Terima</option><option value="rejected">Tolak</option><option value="uncertain">Tidak pasti</option>
                 </select>
-              </article>) : <div className="notice notice-warning" role="status">{analysis ? "Analisis selesai tanpa temuan tersimpan." : "Belum ada temuan terstruktur yang tersimpan."}</div>}
+              </article>) : <div className="notice notice-warning" role="status">{analysis ? "Analisis selesai tanpa temuan tersimpan." : "Belum ada temuan terstruktur. Baseline ini hanya menghasilkan skor label 0/1; labelnya belum dipetakan ke temuan medis."}</div>}
               <p className="muted-copy">Semua skor model bersifat eksperimental dan tidak terkalibrasi. Hasil memerlukan peninjauan manusia.</p>
               {analysis && <p className="muted-copy">Model: {analysis.model_version.provider} · {analysis.model_version.model_id} · {analysis.model_version.prompt_version}</p>}
               <dl className="study-metadata"><div><dt>Status pipeline</dt><dd>{study.status}</dd></div><div><dt>Provider</dt><dd>{analysis?.model_version.provider ?? "Belum dikonfigurasi"}</dd></div><div><dt>Review</dt><dd>{analysis?.findings.filter((finding) => finding.review_status === "pending").length ?? 0} menunggu</dd></div></dl>
@@ -190,5 +191,6 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
     </div>
   );
 }
+
 
 
