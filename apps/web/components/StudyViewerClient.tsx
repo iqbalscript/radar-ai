@@ -30,6 +30,10 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
   const [error, setError] = useState("");
   const [reviewError, setReviewError] = useState("");
   const slice = study?.slices[index];
+  const topCandidate = modelScores?.slices.reduce((best, current) =>
+    current.class_1_score > best.class_1_score ? current : best,
+  );
+  const activeSliceScore = modelScores?.slices.find((item) => item.index === index);
   const imageUrl = useMemo(
     () => slice ? `${API_BASE}/v1/studies/${studyId}/slices/${slice.slice_id}/image` : "",
     [slice, studyId],
@@ -134,8 +138,15 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
               <div className="image-toolbar"><span>SLICE {slice ? index + 1 : 0} / {study.slices.length}</span><span>{slice?.z_position_mm == null ? "Z position unavailable" : `Z ${slice.z_position_mm} mm`}</span></div>
               <div className="image-stage">
                 {slice ? (
-                  /* eslint-disable-next-line @next/next/no-img-element */
-                  <img src={imageUrl} alt={`Anonymized CT slice ${index + 1} of ${study.slices.length}`} />
+                  <>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={imageUrl} alt={`Anonymized CT slice ${index + 1} of ${study.slices.length}`} />
+                    {activeSliceScore && <div className={`ct-model-label${topCandidate?.index === index ? " ct-model-label-candidate" : ""}`} role="status" aria-live="polite">
+                      <strong>{topCandidate?.index === index ? "KANDIDAT LABEL POSITIF ICH" : "SKOR LABEL POSITIF ICH"}</strong>
+                      <span>{(activeSliceScore.class_1_score * 100).toFixed(1)}%</span>
+                      <small>Skor model · bukan diagnosis</small>
+                    </div>}
+                  </>
                 ) : (
                   <p>Studi ini belum memiliki irisan.</p>
                 )}
