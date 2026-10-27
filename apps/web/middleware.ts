@@ -51,17 +51,25 @@ function checkEdgeRateLimit(
   };
 }
 
-function applySecurityHeaders(response: NextResponse): NextResponse {
+function applySecurityHeaders(
+  response: NextResponse,
+  pathname = ""
+): NextResponse {
   const apiBase = (
     process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
   ).replace(/\/+$/, "");
+
+  const isDev = process.env.NODE_ENV !== "production";
+  const devConnectSrc = isDev
+    ? "ws: wss: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*"
+    : "";
 
   const cspDirectives = [
     "default-src 'self'",
     "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://apis.google.com https://accounts.google.com",
     "style-src 'self' 'unsafe-inline'",
     `img-src 'self' blob: data: ${apiBase} https://*.googleusercontent.com`,
-    `connect-src 'self' ${apiBase} https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://accounts.google.com https://oauth2.googleapis.com`,
+    `connect-src 'self' ${apiBase} https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://accounts.google.com https://oauth2.googleapis.com ${devConnectSrc}`.trim(),
     "frame-src 'self' https://accounts.google.com https://*.firebaseapp.com",
     "frame-ancestors 'none'",
     "base-uri 'self'",
@@ -77,7 +85,11 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
     "Permissions-Policy",
     "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
   );
-  response.headers.set("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+  if (pathname === "/api/auth/oauth-callback") {
+    response.headers.set("Cross-Origin-Opener-Policy", "unsafe-none");
+  } else {
+    response.headers.set("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+  }
   if (process.env.NODE_ENV === "production") {
     response.headers.set(
       "Strict-Transport-Security",
@@ -96,7 +108,8 @@ export function middleware(request: NextRequest) {
     pathname.includes("\0")
   ) {
     return applySecurityHeaders(
-      NextResponse.json({ detail: "Invalid request path" }, { status: 400 })
+      NextResponse.json({ detail: "Invalid request path" }, { status: 400 }),
+      pathname
     );
   }
 
@@ -119,33 +132,40 @@ export function middleware(request: NextRequest) {
         },
       }
     );
-    return applySecurityHeaders(throttled);
+    return applySecurityHeaders(throttled, pathname);
   }
 
   const isPublicAuthRoute = pathname.startsWith("/api/auth/");
   const isLoginPage = pathname === "/login";
   const hasSessionCookie = request.cookies.has(SESSION_COOKIE_NAME);
+  const isWebAuthEnforced =
+    (process.env.NEXT_PUBLIC_REQUIRE_AUTH ?? "").trim().toLowerCase() === "true" ||
+    (process.env.NEXT_PUBLIC_REQUIRE_AUTH ?? "").trim().toLowerCase() === "1" ||
+    (process.env.NEXT_PUBLIC_REQUIRE_AUTH ?? "").trim().toLowerCase() === "yes";
 
   // If already authenticated and visiting /login, redirect to /
   if (isLoginPage && hasSessionCookie) {
     const destination = request.nextUrl.searchParams.get("redirect") || "/";
-    return applySecurityHeaders(NextResponse.redirect(new URL(destination, request.url)));
+    return applySecurityHeaders(
+      NextResponse.redirect(new URL(destination, request.url)),
+      pathname
+    );
   }
 
-  // If unauthenticated and accessing protected application pages, force redirect to /login
-  if (!isApiRoute && !isPublicAuthRoute && !isLoginPage && !hasSessionCookie) {
+  // If unauthenticated and accessing protected application pages, force redirect to /login only if auth is required
+  if (isWebAuthEnforced && !isApiRoute && !isPublicAuthRoute && !isLoginPage && !hasSessionCookie) {
     const loginUrl = new URL("/login", request.url);
     if (pathname !== "/") {
       loginUrl.searchParams.set("redirect", pathname);
     }
-    return applySecurityHeaders(NextResponse.redirect(loginUrl));
+    return applySecurityHeaders(NextResponse.redirect(loginUrl), pathname);
   }
 
   const response = NextResponse.next();
   response.headers.set("X-RateLimit-Limit", String(limit));
   response.headers.set("X-RateLimit-Remaining", String(rate.remaining));
   response.headers.set("X-RateLimit-Reset", String(rate.resetSeconds));
-  return applySecurityHeaders(response);
+  return applySecurityHeaders(response, pathname);
 }
 
 export const config = {

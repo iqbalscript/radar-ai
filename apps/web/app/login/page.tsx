@@ -1,11 +1,11 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import type { FormEvent } from "react";
 import { useAuth } from "@/components/AuthContext";
 
-export default function LoginPage() {
+function LoginForm() {
   const searchParams = useSearchParams();
   const redirectTarget = searchParams.get("redirect") || "/";
   const {
@@ -258,6 +258,36 @@ export default function LoginPage() {
         Alat bantu riset dan demonstrasi saja. Bukan untuk penggunaan klinis; seluruh hasil memerlukan evaluasi manusia.
       </p>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div
+          className="dashboard-shell"
+          style={{ display: "grid", placeItems: "center", minHeight: "65vh" }}
+        >
+          <div style={{ textAlign: "center" }}>
+            <div
+              className="brand-mark"
+              style={{
+                margin: "0 auto 1.25rem",
+                width: "48px",
+                height: "48px",
+                fontSize: "1.5rem",
+              }}
+            >
+              R
+            </div>
+            <h2>Memuat halaman login…</h2>
+          </div>
+        </div>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }
 

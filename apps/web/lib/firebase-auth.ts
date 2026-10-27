@@ -329,31 +329,61 @@ export async function signInWithGooglePopup(): Promise<AuthUser> {
   }
 
   return new Promise<AuthUser>((resolve, reject) => {
+    let resolved = false;
+
+    // Bersihkan hasil sesi sebelumnya dari localStorage
+    try {
+      localStorage.removeItem("RADAR_GOOGLE_OAUTH_RESULT");
+    } catch {}
+
     const timeoutId = window.setTimeout(() => {
       cleanup();
-      reject(new Error("Waktu login Google OAuth habis."));
+      if (!resolved) {
+        reject(new Error("Waktu login Google OAuth habis."));
+      }
     }, 120_000);
 
-    const checkClosed = window.setInterval(() => {
-      if (popup.closed) {
-        cleanup();
-        reject(new Error("Jendela login Google ditutup sebelum selesai."));
+    let channel: BroadcastChannel | null = null;
+    try {
+      if (typeof BroadcastChannel !== "undefined") {
+        channel = new BroadcastChannel("RADAR_GOOGLE_OAUTH_CHANNEL");
+        channel.onmessage = (event: MessageEvent) => {
+          handlePayload(event.data);
+        };
       }
-    }, 600);
+    } catch {}
+
+    function onStorage(event: StorageEvent) {
+      if (event.key !== "RADAR_GOOGLE_OAUTH_RESULT" || !event.newValue) return;
+      try {
+        const parsed = JSON.parse(event.newValue) as unknown;
+        handlePayload(parsed);
+      } catch {}
+    }
 
     function onMessage(event: MessageEvent) {
       if (event.origin !== window.location.origin) return;
-      const payload = event.data as {
+      handlePayload(event.data);
+    }
+
+    function handlePayload(data: unknown) {
+      if (resolved) return;
+      const payload = data as {
         type?: string;
         state?: string;
         idToken?: string;
         accessToken?: string;
         error?: string;
+        errorDescription?: string;
       } | null;
       if (!payload || payload.type !== "RADAR_GOOGLE_OAUTH_RESULT") return;
+
+      resolved = true;
       cleanup();
+
       if (payload.error) {
-        reject(new Error(`Google OAuth gagal: ${payload.error}`));
+        const desc = payload.errorDescription ? `: ${payload.errorDescription}` : "";
+        reject(new Error(`Google OAuth gagal (${payload.error}${desc})`));
         return;
       }
       if (payload.state !== state) {
@@ -366,13 +396,52 @@ export async function signInWithGooglePopup(): Promise<AuthUser> {
       }).then(resolve, reject);
     }
 
+    const checkClosed = window.setInterval(() => {
+      if (resolved) return;
+
+      // Periksa terlebih dahulu apakah hasil sudah tersimpan di localStorage
+      try {
+        const raw = localStorage.getItem("RADAR_GOOGLE_OAUTH_RESULT");
+        if (raw) {
+          handlePayload(JSON.parse(raw));
+          if (resolved) return;
+        }
+      } catch {}
+
+      if (popup.closed) {
+        // Berikan toleransi waktu 800ms jika pesan sedang dikirimkan antar-jendela
+        window.setTimeout(() => {
+          if (resolved) return;
+          try {
+            const raw = localStorage.getItem("RADAR_GOOGLE_OAUTH_RESULT");
+            if (raw) {
+              handlePayload(JSON.parse(raw));
+              if (resolved) return;
+            }
+          } catch {}
+          cleanup();
+          reject(new Error("Jendela login Google ditutup sebelum selesai."));
+        }, 800);
+      }
+    }, 600);
+
     function cleanup() {
       window.clearTimeout(timeoutId);
       window.clearInterval(checkClosed);
       window.removeEventListener("message", onMessage);
+      window.removeEventListener("storage", onStorage);
+      if (channel) {
+        try {
+          channel.close();
+        } catch {}
+      }
+      try {
+        localStorage.removeItem("RADAR_GOOGLE_OAUTH_RESULT");
+      } catch {}
     }
 
     window.addEventListener("message", onMessage);
+    window.addEventListener("storage", onStorage);
   });
 }
 

@@ -235,6 +235,46 @@ def test_hmac_session_and_firebase_oauth_record_authenticated_reviewer(
     assert hmac_resp.json()["auth_method"] == "hmac_session"
 
 
+def test_local_dev_token_allowed_in_development(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+    import json
+    import time
+
+    header = (
+        base64.urlsafe_b64encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+        .decode()
+        .rstrip("=")
+    )
+    payload = (
+        base64.urlsafe_b64encode(
+            json.dumps(
+                {
+                    "sub": "local-dev-researcher",
+                    "email": "researcher@radar-ai.local",
+                    "name": "Dev",
+                    "exp": int(time.time()) + 3600,
+                }
+            ).encode()
+        )
+        .decode()
+        .rstrip("=")
+    )
+    sig = base64.urlsafe_b64encode(b"radar-local-dev-signature").decode().rstrip("=")
+    token = f"{header}.{payload}.{sig}"
+
+    monkeypatch.setenv("RADAR_ENV", "development")
+    dev_resp = client.get("/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert dev_resp.status_code == 200
+    assert dev_resp.json()["auth_method"] == "local_dev"
+    assert dev_resp.json()["reviewer_id"] == "researcher@radar-ai.local"
+
+    monkeypatch.setenv("RADAR_ENV", "production")
+    prod_resp = client.get("/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert prod_resp.status_code == 401
+
+
 def test_rate_limiter_enforces_upload_and_general_limits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

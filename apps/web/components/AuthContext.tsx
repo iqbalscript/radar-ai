@@ -97,7 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const isLoginPage = pathname === "/login";
     const isPublic = pathname.startsWith("/api/auth/");
 
-    if (!user && !isLoginPage && !isPublic) {
+    if (authRequired && !user && !isLoginPage && !isPublic) {
       const redirectUrl =
         pathname === "/"
           ? "/login"
@@ -112,7 +112,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         router.replace("/");
       }
     }
-  }, [user, loading, pathname, router]);
+  }, [user, loading, pathname, router, authRequired]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
