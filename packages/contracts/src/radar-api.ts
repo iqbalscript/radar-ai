@@ -2,6 +2,7 @@
 
 export type StudyStatus = "uploaded" | "processing" | "ready" | "failed";
 export type FindingReviewStatus = "pending" | "accepted" | "rejected" | "uncertain";
+export type ReportReviewStatus = "draft" | "in_review" | "approved" | "rejected";
 
 export interface StudySlice {
   slice_id: string;
@@ -88,4 +89,32 @@ export interface StudyLocalizations {
   score_semantics: "SAMIHS binary ICH segmentation mask; research localization only";
   slices: SliceLocalization[];
 }
+
+export interface FindingReviewEvent {
+  review_event_id: string;
+  finding_id: string;
+  previous_review_status: FindingReviewStatus | null;
+  review_status: Exclude<FindingReviewStatus, "pending">;
+  reviewer: string;
+  created_at: string;
+}
+
+export interface ClinicalReportDraft {
+  report_id: string;
+  study_id: string;
+  study_code: string;
+  status: ReportReviewStatus;
+  clinical_indication: string;
+  technique: string;
+  findings: string;
+  impression: string;
+  reviewer_notes: string;
+  reviewer_id: string;
+  concurrence_confirmed: boolean;
+  created_at: string;
+  updated_at: string;
+  signed_at: string | null;
+  non_clinical_disclaimer: string;
+}
+
 

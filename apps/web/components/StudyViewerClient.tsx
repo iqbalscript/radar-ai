@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   Study,
   StudyAnalysisResponse,
@@ -11,12 +11,13 @@ import type {
   FindingReviewStatus,
 } from "@radar-ai/contracts";
 import { useAuth } from "@/components/AuthContext";
-import { ReviewStatusBadge, StudyStatusBadge } from "@/components/ClinicalBadge";
+import { StudyStatusBadge } from "@/components/ClinicalBadge";
 import {
   CRANIAL_WINDOW_PRESETS,
   type WindowPreset,
 } from "@/components/CornerstoneViewport";
 import { DisclaimerBanner } from "@/components/DisclaimerBanner";
+import { FindingsSidebar } from "@/components/FindingsSidebar";
 import {
   API_BASE,
   apiFetch,
@@ -71,9 +72,14 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
   const [scoreError, setScoreError] = useState("");
   const [index, setIndex] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [inferring, setInferring] = useState(false);
   const [error, setError] = useState("");
   const [reviewError, setReviewError] = useState("");
+  const [reviewSuccess, setReviewSuccess] = useState("");
   const [blobImage, setBlobImage] = useState<{ sliceId: string; url: string } | null>(null);
+
+  // Track manual slice navigation to prevent async score resolution from overriding user intent (BUG-12)
+  const userInteractedRef = useRef(false);
 
   // Viewer interactive controls
   const [viewerMode, setViewerMode] = useState<ViewerRenderMode>("dicom");
@@ -81,6 +87,11 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
     CRANIAL_WINDOW_PRESETS[0]
   );
   const [showOverlay, setShowOverlay] = useState(true);
+
+  const selectSlice = useCallback((nextIndex: number) => {
+    userInteractedRef.current = true;
+    setIndex(nextIndex);
+  }, []);
 
   const slice = study?.slices[index];
 
@@ -191,9 +202,11 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
       }
       if (event.key === "ArrowLeft") {
         event.preventDefault();
+        userInteractedRef.current = true;
         setIndex((current) => Math.max(0, current - 1));
       } else if (event.key === "ArrowRight") {
         event.preventDefault();
+        userInteractedRef.current = true;
         setIndex((current) => Math.min(study.slices.length - 1, current + 1));
       }
     }
@@ -224,6 +237,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
   const applyDemoFallback = useCallback(
     (matchedDemo: DemoStudyEntry) => {
       const demoStudy = matchedDemo.analysis.study;
+      userInteractedRef.current = false;
       setDemoEntry(matchedDemo);
       setStudy(demoStudy);
       setAnalysis(matchedDemo.analysis);
@@ -242,9 +256,60 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
     [resolveInitialSliceIndex]
   );
 
+  const runInferenceRefresh = useCallback(async () => {
+    if (demoEntry) {
+      setAnalysis(demoEntry.analysis);
+      return;
+    }
+    setInferring(true);
+    setScoreError("");
+    setLocalizationError("");
+
+    try {
+      const safeStudyId = assertValidUuid(studyId, "Study ID");
+      const analysisResponse = await apiFetch(`/v1/studies/${safeStudyId}/analysis`);
+      if (analysisResponse.ok) {
+        const resolvedAnalysis = (await analysisResponse.json()) as StudyAnalysisResponse;
+        setAnalysis(resolvedAnalysis);
+      }
+
+      await Promise.allSettled([
+        fetchModelScores(safeStudyId)
+          .then((scores) => {
+            setModelScores(scores);
+            if (!userInteractedRef.current && scores.slices.length > 0) {
+              const best = scores.slices.reduce((a, b) =>
+                b.class_1_score > a.class_1_score ? b : a
+              );
+              setIndex((current) => (current === 0 ? best.index : current));
+            }
+          })
+          .catch((cause: unknown) =>
+            setScoreError(
+              cause instanceof Error ? cause.message : "Skor model tidak tersedia."
+            )
+          ),
+        fetchStudyLocalizations(safeStudyId)
+          .then(setLocalizations)
+          .catch((cause: unknown) =>
+            setLocalizationError(
+              cause instanceof Error ? cause.message : "Lokalisasi lesi tidak tersedia."
+            )
+          ),
+      ]);
+    } catch (cause) {
+      setScoreError(
+        cause instanceof Error ? cause.message : "Gagal memperbarui inference."
+      );
+    } finally {
+      setInferring(false);
+    }
+  }, [demoEntry, studyId]);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
+    userInteractedRef.current = false;
     const matchedDemo = getDemoStudyById(studyId);
     try {
       const safeStudyId = assertValidUuid(studyId, "Study ID");
@@ -281,7 +346,11 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
       void fetchModelScores(safeStudyId)
         .then((scores) => {
           setModelScores(scores);
-          if (!resolvedAnalysis?.findings.length && scores.slices.length > 0) {
+          if (
+            !userInteractedRef.current &&
+            !resolvedAnalysis?.findings.length &&
+            scores.slices.length > 0
+          ) {
             const best = scores.slices.reduce((a, b) =>
               b.class_1_score > a.class_1_score ? b : a
             );
@@ -313,6 +382,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
 
   useEffect(() => {
     let ignore = false;
+    userInteractedRef.current = false;
     async function fetchStudy() {
       const matchedDemo = getDemoStudyById(studyId);
       try {
@@ -355,7 +425,11 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
           .then((scores) => {
             if (!ignore) {
               setModelScores(scores);
-              if (!resolvedAnalysis?.findings.length && scores.slices.length > 0) {
+              if (
+                !userInteractedRef.current &&
+                !resolvedAnalysis?.findings.length &&
+                scores.slices.length > 0
+              ) {
                 const best = scores.slices.reduce((a, b) =>
                   b.class_1_score > a.class_1_score ? b : a
                 );
@@ -405,6 +479,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
 
   async function recordReview(findingId: string, review_status: FindingReviewStatus) {
     setReviewError("");
+    setReviewSuccess("");
     if (demoEntry && analysis) {
       setAnalysis({
         ...analysis,
@@ -414,6 +489,9 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
             : finding
         ),
       });
+      setReviewSuccess(
+        `Keputusan reviewer (${review_status.toUpperCase()}) tercatat pada sesi fixture lokal.`
+      );
       return;
     }
     const hasConfiguredApiKey = Boolean(
@@ -438,7 +516,12 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
       );
       if (response.status === 401) {
         throw new Error(
-          "Autentikasi diperlukan untuk menyimpan keputusan reviewer."
+          "Autentikasi diperlukan untuk menyimpan keputusan reviewer (HTTP 401)."
+        );
+      }
+      if (response.status === 429) {
+        throw new Error(
+          "Batas laju permintaan (rate limit) tercapai saat menyimpan keputusan reviewer (HTTP 429)."
         );
       }
       if (!response.ok) {
@@ -455,6 +538,9 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
             : finding
         ),
       });
+      setReviewSuccess(
+        `Keputusan reviewer (${review_status.toUpperCase()}) berhasil disimpan ke log audit server.`
+      );
     } catch (cause) {
       setReviewError(
         cause instanceof Error
@@ -466,6 +552,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
 
   const studyCode =
     demoEntry?.code ?? `CT-${study?.study_id.slice(0, 8).toUpperCase() ?? "STUDY"}`;
+  const reviewerId = user?.email ?? "local-reviewer";
 
   return (
     <div className="viewer-shell">
@@ -633,7 +720,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                           modality={study.modality}
                           imageIds={dicomImageIds}
                           activeSliceIdx={index}
-                          onSliceChange={setIndex}
+                          onSliceChange={selectSlice}
                           windowPreset={windowPreset}
                           showOverlay={showOverlay}
                           isEvidenceSlice={isActiveSliceEvidence}
@@ -741,7 +828,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                   className="button-secondary"
                   type="button"
                   disabled={!slice || index === 0}
-                  onClick={() => setIndex((n) => Math.max(0, n - 1))}
+                  onClick={() => selectSlice(Math.max(0, index - 1))}
                 >
                   ← Irisan sebelumnya
                 </button>
@@ -760,7 +847,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                   type="button"
                   disabled={!slice || index >= study.slices.length - 1}
                   onClick={() =>
-                    setIndex((n) => Math.min(study.slices.length - 1, n + 1))
+                    selectSlice(Math.min(study.slices.length - 1, index + 1))
                   }
                 >
                   Irisan berikutnya →
@@ -772,7 +859,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                   max={Math.max(0, study.slices.length - 1)}
                   value={index}
                   disabled={!slice}
-                  onChange={(event) => setIndex(Number(event.target.value))}
+                  onChange={(event) => selectSlice(Number(event.target.value))}
                   aria-label="Pilih irisan CT"
                 />
 
@@ -794,7 +881,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
                           className={`slice-pill-btn${isActive ? " active" : ""}${
                             isCited || isTopScore ? " evidence" : ""
                           }`}
-                          onClick={() => setIndex(idx)}
+                          onClick={() => selectSlice(idx)}
                           title={`Irisan #${idx + 1} (${
                             item.z_position_mm ?? 0
                           } mm)${isCited ? " — Irisan Bukti AI" : ""}`}
@@ -812,310 +899,27 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
               </div>
             </section>
 
-            {/* Right Sidebar: Inference Findings, Slice Scores, Localizations & Model Version */}
-            <aside className="review-panel" aria-label="Panel analisis dan temuan model">
-              <p className="eyebrow">ANALYSIS & SLICE-LINKED FINDINGS</p>
-              <h2>Prediksi Model & Referensi Irisan</h2>
-              <p className="non-diagnostic-callout">
-                <strong>PERINGATAN NON-DIAGNOSTIK:</strong> Output di bawah ini adalah
-                skor matematis eksperimental yang belum terkalibrasi. Jangan gunakan
-                untuk diagnosis klinis atau keputusan medis.
-              </p>
-
-              {/* 1. Persisted Findings & Cited Evidence Slices */}
-              <h3>Kandidat model & temuan tersimpan</h3>
-              {reviewError && (
-                <div className="notice notice-error" role="alert">
-                  {reviewError}
-                </div>
-              )}
-
-              {analysis?.findings.length ? (
-                analysis.findings.map((finding) => (
-                  <article className="finding-card" key={finding.finding_id}>
-                    <div className="finding-card-header">
-                      <h3>Dugaan perdarahan intrakranial (ICH)</h3>
-                      <ReviewStatusBadge status={finding.review_status} />
-                    </div>
-                    <p>
-                      Skor prediksi model:{" "}
-                      <strong>{(finding.confidence * 100).toFixed(0)}%</strong> · belum
-                      terkalibrasi (bukan diagnosis)
-                    </p>
-                    <p className="muted-copy mono">
-                      Kategori: {finding.category} · Model Ver:{" "}
-                      {finding.model_version_id.slice(0, 8)}
-                    </p>
-                    <div className="finding-evidence">
-                      <span>Irisan bukti terkait:</span>
-                      {finding.evidence_slice_ids.map((sliceId) => {
-                        const evidenceIndex = study.slices.findIndex(
-                          (item) => item.slice_id === sliceId
-                        );
-                        const evidenceSlice =
-                          evidenceIndex >= 0 ? study.slices[evidenceIndex] : null;
-                        const isCurrent = evidenceIndex === index;
-                        return (
-                          <button
-                            key={sliceId}
-                            type="button"
-                            className={`evidence-link${isCurrent ? " active" : ""}`}
-                            onClick={() =>
-                              evidenceIndex >= 0 && setIndex(evidenceIndex)
-                            }
-                          >
-                            ★ Irisan #{evidenceIndex + 1}
-                            {evidenceSlice?.z_position_mm != null
-                              ? ` (${evidenceSlice.z_position_mm} mm)`
-                              : ""}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <label htmlFor={`review-${finding.finding_id}`}>
-                      Keputusan reviewer (audit manusia)
-                    </label>
-                    <select
-                      id={`review-${finding.finding_id}`}
-                      value={finding.review_status}
-                      onChange={(event) =>
-                        void recordReview(
-                          finding.finding_id,
-                          event.target.value as FindingReviewStatus
-                        )
-                      }
-                    >
-                      <option value="pending" disabled>
-                        Menunggu review
-                      </option>
-                      <option value="accepted">Terima (Accepted)</option>
-                      <option value="rejected">Tolak (Rejected)</option>
-                      <option value="uncertain">Tidak pasti (Uncertain)</option>
-                    </select>
-                  </article>
-                ))
-              ) : topCandidate ? (
-                <article className="finding-card">
-                  <h3>Kandidat skor tertinggi · belum ditinjau</h3>
-                  <p>
-                    Skor model untuk label positif ICH:{" "}
-                    <strong>{(topCandidate.class_1_score * 100).toFixed(1)}%</strong> ·
-                    irisan #{topCandidate.index + 1}
-                  </p>
-                  <button
-                    className="evidence-link"
-                    type="button"
-                    onClick={() => setIndex(topCandidate.index)}
-                  >
-                    ◆ Buka irisan kandidat (#{topCandidate.index + 1})
-                  </button>
-                  <p className="muted-copy">
-                    Diturunkan langsung dari skor inference model untuk target anotasi
-                    RSNA ICH. Belum disimpan sebagai temuan dan belum ditinjau reviewer.
-                    Skor ini bukan diagnosis atau akurasi model.
-                  </p>
-                </article>
-              ) : (
-                <div className="notice notice-warning" role="status">
-                  {isSyntheticFixtureStudy && analysis?.findings.length === 0
-                    ? "Tidak ada kandidat perdarahan yang ditandai pada irisan studi ini."
-                    : scoreError
-                      ? "Kandidat model belum tersedia karena inference lokal belum aktif."
-                      : "Memuat skor inference untuk menampilkan kandidat model…"}
-                </div>
-              )}
-
-              {/* 2. Per-Slice DenseNet121 Model Scores */}
-              <h3>Skor model per irisan (riset)</h3>
-              {modelScores ? (
-                topCandidate ? (
-                  <article className="finding-card">
-                    <h3>Skor label positif ICH tertinggi</h3>
-                    <p>
-                      Skor model untuk label dataset positif:{" "}
-                      <strong>{(topCandidate.class_1_score * 100).toFixed(1)}%</strong>{" "}
-                      · irisan #{topCandidate.index + 1}
-                    </p>
-                    <p className="muted-copy">
-                      Label dataset negatif:{" "}
-                      {(topCandidate.class_0_score * 100).toFixed(1)}% · positif:{" "}
-                      {(topCandidate.class_1_score * 100).toFixed(1)}%
-                    </p>
-                    {activeSliceScore && (
-                      <p className="muted-copy">
-                        Irisan aktif (#{index + 1}): positif{" "}
-                        <strong>
-                          {(activeSliceScore.class_1_score * 100).toFixed(1)}%
-                        </strong>{" "}
-                        · negatif {(activeSliceScore.class_0_score * 100).toFixed(1)}%
-                      </p>
-                    )}
-                    <button
-                      className="evidence-link"
-                      type="button"
-                      onClick={() => setIndex(topCandidate.index)}
-                    >
-                      Lihat irisan skor tertinggi (#{topCandidate.index + 1})
-                    </button>
-                    <p className="muted-copy">
-                      Label 1 berarti irisan dianotasi mengandung perdarahan pada
-                      dataset RSNA ICH; label 0 berarti tidak ada anotasi positif. Ini
-                      skor model per irisan, bukan akurasi atau diagnosis; skor belum
-                      terkalibrasi.
-                    </p>
-                    <p className="muted-copy mono">
-                      {modelScores.model_id} · {modelScores.device} · checkpoint{" "}
-                      {modelScores.checkpoint_sha256.slice(0, 12)}
-                    </p>
-                  </article>
-                ) : (
-                  <p className="muted-copy">Tidak ada skor irisan tersedia.</p>
-                )
-              ) : (
-                <div className="notice notice-warning" role="status">
-                  <strong>
-                    {scoreError
-                      ? "Skor per-irisan DenseNet121 belum tersedia."
-                      : "Menjalankan inference lokal…"}
-                  </strong>
-                  {scoreError && (
-                    <>
-                      <br />
-                      {scoreError}
-                    </>
-                  )}
-                </div>
-              )}
-
-              {/* 3. SAMIHS Segmentation Localization */}
-              <h3>Lokalisasi area oleh SAMIHS</h3>
-              {localizations ? (
-                (() => {
-                  const candidates = localizations.slices.filter(
-                    (item) => item.box !== null
-                  );
-                  const largest = candidates.reduce<
-                    (typeof candidates)[number] | null
-                  >(
-                    (best, current) =>
-                      !best || current.mask_pixels > best.mask_pixels
-                        ? current
-                        : best,
-                    null
-                  );
-                  return (
-                    <article className="finding-card">
-                      {largest ? (
-                        <>
-                          <p>
-                            Mask menemukan area kandidat pada {candidates.length}{" "}
-                            irisan. Kotak mengikuti batas area mask irisan, bukan
-                            diagnosis.
-                          </p>
-                          <button
-                            className="evidence-link"
-                            type="button"
-                            onClick={() => setIndex(largest.index)}
-                          >
-                            Lihat area mask terbesar · irisan #{largest.index + 1}
-                          </button>
-                        </>
-                      ) : study.slices.length < 16 ? (
-                        <p>
-                          Studi ini hanya berisi {study.slices.length} irisan. Paket
-                          model ditujukan untuk volume CT otak sekitar 16–180 irisan;
-                          unggah seluruh seri, bukan satu irisan lepas.
-                        </p>
-                      ) : (
-                        <p>
-                          Model tidak menghasilkan area mask pada seri ini pada
-                          threshold yang dipilih.
-                        </p>
-                      )}
-                      <p className="muted-copy mono">
-                        {localizations.model_id} · {localizations.device} · threshold{" "}
-                        {localizations.threshold} · checkpoint{" "}
-                        {localizations.checkpoint_sha256.slice(0, 12)}
-                      </p>
-                    </article>
-                  );
-                })()
-              ) : (
-                <div className="notice notice-warning" role="status">
-                  <strong>
-                    {localizationError
-                      ? "Lokalisasi mask SAMIHS belum tersedia."
-                      : "Menjalankan model lokalisasi lokal…"}
-                  </strong>
-                  {localizationError && (
-                    <>
-                      <br />
-                      {localizationError}
-                    </>
-                  )}
-                </div>
-              )}
-
-              {/* 4. Model Version & Provenance Metadata */}
-              <h3>Versi Model & Provenance</h3>
-              <dl className="study-metadata">
-                <div>
-                  <dt>Status pipeline</dt>
-                  <dd>{study.status}</dd>
-                </div>
-                <div>
-                  <dt>Provider model</dt>
-                  <dd className="mono">
-                    {analysis?.model_version.provider ?? "local_checkpoint"}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Model ID</dt>
-                  <dd className="mono">
-                    {analysis?.model_version.model_id ??
-                      modelScores?.model_id ??
-                      "densenet121-rsna-ich"}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Versi prompt / skema</dt>
-                  <dd className="mono">
-                    {analysis?.model_version.prompt_version ??
-                      analysis?.schema_version ??
-                      "v1.0.0"}
-                  </dd>
-                </div>
-                {analysis?.model_version.model_version_id && (
-                  <div>
-                    <dt>Model Version Ref</dt>
-                    <dd className="mono">
-                      {analysis.model_version.model_version_id.slice(0, 12)}
-                    </dd>
-                  </div>
-                )}
-                {modelScores?.checkpoint_sha256 && (
-                  <div>
-                    <dt>Checkpoint SHA-256</dt>
-                    <dd className="mono">
-                      {modelScores.checkpoint_sha256.slice(0, 12)}
-                    </dd>
-                  </div>
-                )}
-                <div>
-                  <dt>Reviewer aktif</dt>
-                  <dd>{user?.email ?? "local-reviewer"}</dd>
-                </div>
-                <div>
-                  <dt>Klasifikasi penggunaan</dt>
-                  <dd className="safety-tag">NOT FOR CLINICAL USE</dd>
-                </div>
-              </dl>
-
-              <p className="muted-copy" style={{ marginTop: 14 }}>
-                Semua skor model bersifat eksperimental dan tidak terkalibrasi. Hasil
-                memerlukan peninjauan mandiri oleh klinisi yang berwenang.
-              </p>
-            </aside>
+            {/* Right Sidebar: Findings, Slice Scores, Localizations, Report Editor & Reviewer Actions */}
+            <FindingsSidebar
+              study={study}
+              studyCode={studyCode}
+              analysis={analysis}
+              modelScores={modelScores}
+              localizations={localizations}
+              topCandidate={topCandidate}
+              activeSliceScore={activeSliceScore}
+              activeSliceIdx={index}
+              onSelectSlice={selectSlice}
+              isSyntheticFixtureStudy={isSyntheticFixtureStudy}
+              scoreError={scoreError}
+              localizationError={localizationError}
+              reviewError={reviewError}
+              reviewSuccess={reviewSuccess}
+              inferring={inferring}
+              onRetryInference={() => void runInferenceRefresh()}
+              onRecordReview={recordReview}
+              reviewerId={reviewerId}
+            />
           </div>
         </>
       )}

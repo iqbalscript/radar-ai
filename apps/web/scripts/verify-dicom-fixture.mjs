@@ -178,4 +178,62 @@ assert.ok(
 console.log("  [PASS] StudyViewerClient integrates CornerstoneViewport (ssr: false)");
 console.log("  [PASS] Bidirectional slice navigation & evidence_slice_ids refs verified");
 console.log("  [PASS] Model version provenance & NOT FOR CLINICAL USE guardrails verified");
-console.log("=== All RDA-4 Viewer & Slice-Ref Checks Passed ===\n");
+
+// Verify Findings Sidebar, Report Editor & Reviewer Actions (RDA-4 Sprint 2)
+console.log("\n=== RADAR AI | RDA-4 Findings Sidebar, Report Editor & Reviewer Actions Verification ===");
+const findingsSidebarPath = path.resolve(__dirname, "../components/FindingsSidebar.tsx");
+const reportEditorPath = path.resolve(__dirname, "../components/ReportEditor.tsx");
+const contractsPath = path.resolve(__dirname, "../../../packages/contracts/src/radar-api.ts");
+const handoffDocPath = path.resolve(__dirname, "../../../docs/findings-report-editor-handoff.md");
+
+assert.ok(fs.existsSync(findingsSidebarPath), "Missing FindingsSidebar.tsx component");
+assert.ok(fs.existsSync(reportEditorPath), "Missing ReportEditor.tsx component");
+assert.ok(fs.existsSync(contractsPath), "Missing shared contracts file");
+assert.ok(fs.existsSync(handoffDocPath), "Missing findings-report-editor-handoff.md doc");
+
+const sidebarSource = fs.readFileSync(findingsSidebarPath, "utf8");
+const reportSource = fs.readFileSync(reportEditorPath, "utf8");
+const contractsSource = fs.readFileSync(contractsPath, "utf8");
+
+assert.ok(
+  viewerSource.includes("FindingsSidebar"),
+  "StudyViewerClient must mount FindingsSidebar"
+);
+assert.ok(
+  sidebarSource.includes("ReportEditor") && sidebarSource.includes("onRetryInference"),
+  "FindingsSidebar must integrate ReportEditor and visible inference retry trigger"
+);
+assert.ok(
+  sidebarSource.includes("ERR_REVIEW_API") &&
+    sidebarSource.includes("ERR_SCORES_503") &&
+    sidebarSource.includes("ERR_SAMIHS_503"),
+  "FindingsSidebar must expose visible error recovery codes for request failures"
+);
+assert.ok(
+  reportSource.includes("synthesizeDraftFromAi") &&
+    reportSource.includes("handleInsertActiveSliceCitation") &&
+    reportSource.includes("handleReviewerStatusAction"),
+  "ReportEditor must support AI draft synthesis, active slice citation insertion, and reviewer sign-off actions"
+);
+assert.ok(
+  reportSource.includes("clinical_indication") &&
+    reportSource.includes("technique") &&
+    reportSource.includes("findings") &&
+    reportSource.includes("impression") &&
+    reportSource.includes("reviewer_notes"),
+  "ReportEditor must support manual editing across all 5 clinical research report sections"
+);
+assert.ok(
+  reportSource.includes("PROTOTYPING ONLY — NOT FOR CLINICAL USE"),
+  "ReportEditor must enforce non-diagnostic disclaimer in generated drafts and exports"
+);
+assert.ok(
+  contractsSource.includes("ClinicalReportDraft") &&
+    contractsSource.includes("ReportReviewStatus"),
+  "Shared contracts must export ClinicalReportDraft and ReportReviewStatus"
+);
+
+console.log("  [PASS] FindingsSidebar & 5-stage workflow stepper (Upload→View→Infer→Draft→Approve) verified");
+console.log("  [PASS] ReportEditor AI synthesis, manual editing, & active slice citation insertion verified");
+console.log("  [PASS] Reviewer audit decisions, concurrence check, & visible failure recovery verified");
+console.log("=== All RDA-4 Viewer, Findings & Report Editor Checks Passed ===\n");

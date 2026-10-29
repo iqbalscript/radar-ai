@@ -30,8 +30,12 @@ Each issue is classified by severity, root cause, reproduction steps, affected f
 | **[BUG-09](./BUG-09-cornerstone-webgl-context-lifecycle.md)** | WebGL2 context leaks and unhandled context loss on rapid study switching in `CornerstoneViewport` | Frontend (`apps/web`) | **P2 (Medium)** | Documented / Fix available |
 | **[BUG-10](./BUG-10-api-rate-limiter-eviction-starvation.md)** | Sliding window rate limiter inactive bucket eviction starvation & process memory retention | Backend (`apps/api`) | **P2 (Medium)** | Documented / Fix available |
 | **[BUG-11](./BUG-11-dicom-slice-ordering-floating-precision.md)** | Sub-millimeter floating-point slice ordering key jitter in multi-slice DICOM upload | Backend (`apps/api`) | **P3 (Low)** | Documented / Fix available |
-| **[BUG-12](./BUG-12-viewer-slice-selection-race-condition.md)** | Race condition in `StudyViewerClient` initial slice selection vs async `fetchModelScores` | Frontend (`apps/web`) | **P3 (Low)** | Documented / Fix available |
+| **[BUG-12](./BUG-12-viewer-slice-selection-race-condition.md)** | Race condition in `StudyViewerClient` initial slice selection vs async `fetchModelScores` | Frontend (`apps/web`) | **P3 (Low)** | Resolved (RDA-4) |
 | **[BUG-13](./BUG-13-ci-runner-disk-exhaustion-cuda-wheels.md)** | GitHub Actions CI runner disk exhaustion from full CUDA PyTorch wheels (`[Errno 28] No space left on device`) | Tooling / CI | **P2 (Medium)** | Resolved |
+| **[BUG-14](./BUG-14-dicom-uid-null-byte-padding-validation.md)** | DICOM Part 5 odd-byte trailing null pad (`\x00`) rejection in backend UID validation | Backend (`apps/api`) | **P2 (Medium)** | Documented / Fix available |
+| **[BUG-15](./BUG-15-firebase-token-refresh-thundering-herd.md)** | Concurrent Firebase ID token refresh thundering herd race condition in web client | Frontend (`apps/web`) | **P2 (Medium)** | Documented / Fix available |
+| **[BUG-16](./BUG-16-report-editor-localstorage-quota-eviction.md)** | Client-side report draft `localStorage` origin quota starvation and missing LRU eviction | Frontend (`apps/web`) | **P3 (Low)** | Documented / Fix available |
+| **[BUG-17](./BUG-17-dicom-preamble-magic-byte-false-positives.md)** | DICOM Part 10 preamble heuristic collision with active content magic byte detection | Security / Ingestion | **P3 (Low)** | Documented / Fix available |
 
 ---
 
@@ -50,13 +54,18 @@ Each issue is classified by severity, root cause, reproduction steps, affected f
    - Patched `BUG-02`: Integrated `CornerstoneViewport` into `StudyViewerClient` with dual-mode toggle and interactive HU probe.
    - Patched `BUG-03`: Added cancellation tracking and revoked abandoned Object URLs during async slice image resolution.
    - Patched `BUG-04`: Added `"test": "node scripts/verify-dicom-fixture.mjs"` to `apps/web/package.json`.
+   - Patched `BUG-12`: Added `userInteractedRef` in `StudyViewerClient.tsx` to prevent async `fetchModelScores` from overriding deliberate slice selection.
+   - Patched `BUG-13`: Locked CPU-only PyTorch wheels on CI runners and pruned unused toolchains, eliminating runner disk exhaustion.
 
-2. **Next Sprint (Performance & Client Resource Optimization)**:
+2. **Next Sprint (Standards Compliance, Concurrency & Client Resource Optimization)**:
+   - Patch `BUG-14`: Strip null byte pads (`\0`) alongside whitespace in `dicom_validation.py` to prevent false rejection of compliant DICOM Part 5 UIDs.
+   - Patch `BUG-15`: Add in-flight singleton promise deduplication to `getValidIdToken()` in `firebase-auth.ts` to prevent thundering-herd session invalidation.
+   - Patch `BUG-16`: Implement LRU eviction for `radar_report_draft_v1_*` in `ReportEditor.tsx` when `QuotaExceededError` occurs.
+   - Patch `BUG-17`: Validate `"DICM"` offset 128 before applying offset-0 magic prefix heuristics to eliminate preamble false positives on legacy scanner hardware.
    - Patch `BUG-08`: Implement bounded LRU eviction (e.g. max 64 slices) for `parsedSliceCache` and `customMetadataStore` in `CornerstoneViewport.tsx`.
    - Patch `BUG-09`: Explicitly invoke `engine.disableElement(viewportId)` before `engine.destroy()`, and handle `webglcontextlost`/`webglcontextrestored` events.
    - Patch `BUG-10`: Add background/periodic sweep to evict inactive buckets from `SlidingWindowRateLimiter` in `security.py`.
    - Patch `BUG-11`: Round `slice_position` to 3 decimal places (1 micron) before sorting uploaded slices in `main.py` and `dicom_validation.py`.
-   - Patch `BUG-12`: Add `userInteractedRef` in `StudyViewerClient.tsx` to prevent async `fetchModelScores` from snapping the active slice if the user manually browsed to slice 0.
 
 3. **Infrastructure & Production Readiness**:
    - Resolve `BUG-05` by providing a distributed Redis/Upstash adapter for edge rate limiting in production.

@@ -97,5 +97,6 @@ The Sprint 1 preprocessing, grouped split-manifest, memory budget, and dependent
 The offline DenseNet121 checkpoint contract, inference command, current validation evidence, and data/model handoff are documented in [`docs/ct-inference-handoff.md`](docs/ct-inference-handoff.md).
 The optional pretrained SAMIHS hemorrhage mask localizer, one-time offline provisioning, viewer boxes, and validation limits are documented in [`docs/ich-localization-handoff.md`](docs/ich-localization-handoff.md). It uses existing weights only; it does not train or fine-tune.
 The Cornerstone3D DICOM viewer integration, Hounsfield Unit voxel probing, cranial windowing presets, bidirectional slice-to-finding evidence linking, and non-diagnostic model provenance display are documented in [`docs/dicom-viewer-integration.md`](docs/dicom-viewer-integration.md).
+The findings sidebar, structured report editor, slice citation insertion, reviewer actions, and visible failure recovery are documented in [`docs/findings-report-editor-handoff.md`](docs/findings-report-editor-handoff.md).
 
 

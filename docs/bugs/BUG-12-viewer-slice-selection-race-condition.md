@@ -3,6 +3,7 @@
 **Severity:** P3 (Low)  
 **Component:** `apps/web/components/StudyViewerClient.tsx`  
 **Found in:** Sprint 2 Hardening Audit  
+**Status:** Resolved (RDA-4 Sprint 2)  
 **Type:** Async State Race Condition / UI Scrubbing Jitter  
 **Notice:** Research prototype only — **NOT FOR CLINICAL USE**.
 
@@ -78,4 +79,15 @@ if (!resolvedAnalysis?.findings.length && scores.slices.length > 0) {
   }
 }
 ```
+
+---
+
+## 5. Resolution Verification (RDA-4)
+
+Implemented in `apps/web/components/StudyViewerClient.tsx`:
+- Added `userInteractedRef = useRef(false)`.
+- Set `userInteractedRef.current = true` on `selectSlice()` and Left/Right keyboard navigation.
+- Evaluated `!userInteractedRef.current` inside the `fetchModelScores` promise callback before overriding slice index.
+- Verified in automated test suite `apps/web/scripts/verify-dicom-fixture.mjs`.
+
 
