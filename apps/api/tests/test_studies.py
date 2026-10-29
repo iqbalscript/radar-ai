@@ -140,6 +140,7 @@ def test_upload_accepts_anonymized_ct_series_and_stores_privately(
 
     assert response.status_code == 201
     result = response.json()
+    assert result["status"] == "ready"
     assert [item["index"] for item in result["slices"]] == [0, 1]
     assert [item["z_position_mm"] for item in result["slices"]] == [1.0, 5.0]
     assert "storage_key" not in response.text
@@ -265,3 +266,51 @@ def test_private_store_rejects_path_traversal(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="outside the private root"):
         store.path_for("../public/image.dcm")
+
+
+def test_web_fixture_series_upload_and_study_list_status_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage_root = tmp_path / "private"
+    monkeypatch.setenv("RADAR_STORAGE_DIR", str(storage_root))
+    fixture_dir = (
+        Path(__file__).resolve().parents[2]
+        / "web"
+        / "public"
+        / "fixtures"
+        / "dicom"
+        / "brain-ct"
+    )
+    fixture_files = sorted(fixture_dir.glob("slice-*.dcm"))
+    assert len(fixture_files) == 5
+
+    study_id = create_study()
+    initial_list = client.get("/v1/studies").json()
+    assert len(initial_list) == 1
+    assert initial_list[0]["status"] == "uploaded"
+
+    response = client.post(
+        f"/v1/studies/{study_id}/dicom",
+        files=[
+            ("files", (path.name, path.read_bytes(), "application/dicom"))
+            for path in fixture_files
+        ],
+    )
+    assert response.status_code == 201
+    updated = response.json()
+    assert updated["status"] == "ready"
+    assert len(updated["slices"]) == 5
+    assert [s["z_position_mm"] for s in updated["slices"]] == [
+        -15.0,
+        -10.0,
+        1.5,
+        6.5,
+        11.5,
+    ]
+
+    study_list = client.get("/v1/studies").json()
+    assert len(study_list) == 1
+    assert study_list[0]["study_id"] == study_id
+    assert study_list[0]["status"] == "ready"
+    assert len(study_list[0]["slices"]) == 5
+

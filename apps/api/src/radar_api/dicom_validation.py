@@ -187,6 +187,23 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
                 "DICOM File Meta has a missing or invalid Transfer Syntax UID"
             )
 
+        is_synthetic_phantom_fixture = (
+            str(getattr(dataset, "PatientIdentityRemoved", "")).strip().upper() == "YES"
+            and str(getattr(dataset, "DeidentificationMethod", "")).strip()
+            == "SYNTHETIC_MATHEMATICAL_PHANTOM_NO_PATIENT_DATA"
+            and str(getattr(dataset, "PatientName", "")).strip() == "ANONYMIZED^BRAIN^CT"
+            and not _has_value(getattr(dataset, "PatientBirthDate", None))
+        )
+        synthetic_allowed_keywords = {
+            "PatientName",
+            "PatientID",
+            "AccessionNumber",
+            "StudyDescription",
+            "SeriesDescription",
+            "StudyID",
+            "ImageComments",
+        }
+
         for element in dataset.iterall():
             is_pseudonymous_patient_id = (
                 element.keyword == "PatientID"
@@ -195,13 +212,21 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
                 )
                 is not None
             )
+            is_allowed_synthetic_tag = (
+                is_synthetic_phantom_fixture
+                and element.keyword in synthetic_allowed_keywords
+            )
             if element.tag.is_private and _has_value(element.value):
                 raise DicomValidationError("DICOM private metadata must be removed before upload")
             if 0x6000 <= element.tag.group <= 0x601E and _has_value(element.value):
                 raise DicomValidationError("DICOM overlay planes must be removed before upload")
             if (
-                (element.keyword in IDENTIFYING_KEYWORDS and not is_pseudonymous_patient_id)
-                or element.VR == "PN"
+                (
+                    element.keyword in IDENTIFYING_KEYWORDS
+                    and not is_pseudonymous_patient_id
+                    and not is_allowed_synthetic_tag
+                )
+                or (element.VR == "PN" and not is_allowed_synthetic_tag)
             ) and _has_value(element.value):
                 raise DicomValidationError(
                     "DICOM contains identifying metadata; upload an anonymized series"

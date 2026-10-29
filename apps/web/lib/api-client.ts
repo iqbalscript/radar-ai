@@ -2,11 +2,48 @@
  * Hardened API client and client-side DICOM upload validator for RADAR AI.
  */
 
+import type { Study } from "@radar-ai/contracts";
 import { getValidIdToken } from "@/lib/firebase-auth";
 
 export const API_BASE = (
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
 ).replace(/\/+$/, "");
+
+export interface UploadProgress {
+  loaded: number;
+  total: number;
+  percent: number;
+}
+
+export class ApiUploadError extends Error {
+  status: number;
+  code: string;
+  retryAfterSeconds?: number;
+
+  constructor(
+    message: string,
+    status = 0,
+    code = "ERR_RADAR_UPLOAD",
+    retryAfterSeconds?: number
+  ) {
+    super(message);
+    this.name = "ApiUploadError";
+    this.status = status;
+    this.code = code;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1
+  );
+  const value = bytes / Math.pow(1024, index);
+  return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
 
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -204,4 +241,204 @@ export async function validateDicomFilesBeforeUpload(
 
   return files;
 }
+
+export async function uploadDicomSeriesWithProgress(
+  studyId: string,
+  files: File[],
+  onProgress?: (progress: UploadProgress) => void,
+  signal?: AbortSignal
+): Promise<Study> {
+  const safeStudyId = assertValidUuid(studyId, "Study ID");
+  const token = await getValidIdToken();
+  const apiKey = (process.env.NEXT_PUBLIC_RADAR_API_KEY ?? "").trim();
+
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append("files", file);
+  }
+
+  return new Promise<Study>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE}/v1/studies/${safeStudyId}/dicom`, true);
+    xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+    if (token) {
+      xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    }
+    if (apiKey) {
+      xhr.setRequestHeader("X-API-Key", apiKey);
+    }
+
+    if (signal) {
+      if (signal.aborted) {
+        xhr.abort();
+        reject(
+          new ApiUploadError(
+            "Unggahan dibatalkan oleh pengguna.",
+            0,
+            "ERR_UPLOAD_ABORTED"
+          )
+        );
+        return;
+      }
+      signal.addEventListener(
+        "abort",
+        () => {
+          xhr.abort();
+        },
+        { once: true }
+      );
+    }
+
+    xhr.upload.onprogress = (event) => {
+      if (!onProgress) return;
+      const total = event.lengthComputable && event.total > 0 ? event.total : totalBytes;
+      const loaded = Math.min(event.loaded, total);
+      const percent = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 50;
+      onProgress({ loaded, total, percent });
+    };
+
+    xhr.onload = () => {
+      const status = xhr.status;
+      if (status >= 200 && status < 300) {
+        try {
+          const study = JSON.parse(xhr.responseText) as Study;
+          onProgress?.({ loaded: totalBytes, total: totalBytes, percent: 100 });
+          resolve(study);
+        } catch {
+          reject(
+            new ApiUploadError(
+              "Respons server tidak dapat dibaca sebagai JSON yang valid.",
+              status,
+              `ERR_PARSE_${status}`
+            )
+          );
+        }
+        return;
+      }
+
+      let detail = "";
+      try {
+        const parsed = JSON.parse(xhr.responseText) as { detail?: string };
+        if (typeof parsed.detail === "string") {
+          detail = parsed.detail;
+        }
+      } catch {
+        detail = "";
+      }
+
+      const retryAfterRaw = xhr.getResponseHeader("Retry-After");
+      const retryAfterSeconds = retryAfterRaw
+        ? Number.parseInt(retryAfterRaw, 10)
+        : undefined;
+
+      if (status === 401) {
+        reject(
+          new ApiUploadError(
+            "Sesi autentikasi tidak valid atau telah berakhir. Silakan login kembali.",
+            401,
+            "ERR_AUTH_401"
+          )
+        );
+        return;
+      }
+      if (status === 413) {
+        reject(
+          new ApiUploadError(
+            detail || "Ukuran file atau jumlah irisan DICOM melebihi batas maksimum server (64 MB/file, 512 MB/seri).",
+            413,
+            "ERR_PAYLOAD_TOO_LARGE_413"
+          )
+        );
+        return;
+      }
+      if (status === 422) {
+        const mappedDetail =
+          detail === "Only CT images are accepted"
+            ? "Tag DICOM Modality (0008,0060) menyatakan modalitas selain CT. Hanya irisan CT yang diterima."
+            : detail || "Validasi seri DICOM gagal di server (pastikan irisan berasal dari seri CT anonim yang sama).";
+        reject(
+          new ApiUploadError(mappedDetail, 422, "ERR_DICOM_VALIDATION_422")
+        );
+        return;
+      }
+      if (status === 429) {
+        const waitHint =
+          retryAfterSeconds && Number.isFinite(retryAfterSeconds)
+            ? `Coba lagi dalam ${retryAfterSeconds} detik.`
+            : "Tunggu sekitar 1 menit sebelum mencoba kembali.";
+        reject(
+          new ApiUploadError(
+            `Batas laju unggahan (rate limit) tercapai. ${waitHint}`,
+            429,
+            "ERR_RATE_LIMIT_429",
+            retryAfterSeconds
+          )
+        );
+        return;
+      }
+
+      reject(
+        new ApiUploadError(
+          detail || `Unggah seri DICOM gagal (HTTP ${status}).`,
+          status,
+          `ERR_HTTP_${status}`
+        )
+      );
+    };
+
+    xhr.onerror = () => {
+      reject(
+        new ApiUploadError(
+          "Koneksi jaringan ke server API terputus saat mengunggah irisan DICOM. Pastikan layanan backend berjalan di port 8000.",
+          0,
+          "ERR_NETWORK_DISCONNECTED"
+        )
+      );
+    };
+
+    xhr.onabort = () => {
+      reject(
+        new ApiUploadError(
+          "Unggahan dibatalkan oleh pengguna.",
+          0,
+          "ERR_UPLOAD_ABORTED"
+        )
+      );
+    };
+
+    xhr.send(formData);
+  });
+}
+
+const DEMO_FIXTURE_FILES = [
+  "slice-0.dcm",
+  "slice-1.dcm",
+  "slice-2.dcm",
+  "slice-3.dcm",
+  "slice-4.dcm",
+] as const;
+
+export async function fetchDemoDicomFixtures(): Promise<File[]> {
+  const files: File[] = [];
+  for (const filename of DEMO_FIXTURE_FILES) {
+    const response = await fetch(`/fixtures/dicom/brain-ct/${filename}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Gagal memuat sampel DICOM lokal (${filename}, HTTP ${response.status}).`
+      );
+    }
+    const blob = await response.blob();
+    files.push(
+      new File([blob], filename, {
+        type: "application/dicom",
+        lastModified: Date.now(),
+      })
+    );
+  }
+  return files;
+}
+
 

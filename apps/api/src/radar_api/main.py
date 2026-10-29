@@ -636,6 +636,7 @@ async def upload_dicom_series(
                 )
             )
 
+        study.status = "ready"
         session.commit()
         return study
     except UploadTooLarge as error:
