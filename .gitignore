@@ -29,6 +29,7 @@ Thumbs.db
 # Data and model artifacts: never commit study data or model weights by default
 data/
 *.dcm
+!apps/web/public/fixtures/**/*.dcm
 *.nii
 *.nii.gz
 *.pt

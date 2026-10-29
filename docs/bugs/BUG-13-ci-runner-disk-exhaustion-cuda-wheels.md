@@ -1,9 +1,9 @@
-# BUG-13: GitHub Actions CI Runner Disk Exhaustion from Full CUDA PyTorch Wheels
+# BUG-13: GitHub Actions CI Runner Disk Exhaustion from Full CUDA PyTorch Wheels & Untracked Fixtures
 
 **Severity:** P2 (Medium)  
-**Component:** `.github/workflows/ci.yml` & `apps/api/requirements.txt`  
-**Found in:** CI Build Run #65  
-**Type:** CI/CD Infrastructure Failure (`OSError: [Errno 28] No space left on device`)  
+**Component:** `.github/workflows/ci.yml`, `.gitignore`, & `apps/api/requirements.txt`  
+**Found in:** CI Build Run #65 & #66  
+**Type:** CI/CD Infrastructure Failure (`OSError: [Errno 28] No space left on device` & Missing Test Fixtures)  
 **Status:** Resolved  
 **Notice:** Research prototype only — **NOT FOR CLINICAL USE**.
 
@@ -11,7 +11,9 @@
 
 ## 1. Description
 
-During GitHub Actions CI execution on `ubuntu-latest`, the `API lint and tests` workflow failed with an out-of-disk exception during `python -m pip install -r requirements.txt`:
+During GitHub Actions CI execution on `ubuntu-latest`:
+1. The `API lint and tests` workflow failed with an out-of-disk exception (`[Errno 28] No space left on device`) due to default PyPI resolution pulling massive NVIDIA CUDA 13 binaries (>10 GB uncompressed).
+2. The `Web lint and typecheck` workflow failed on `npm test` (`scripts/verify-dicom-fixture.mjs`) because `.gitignore` contained `*.dcm` on line 31, preventing `apps/web/public/fixtures/dicom/brain-ct/slice-*.dcm` from being committed to the git repository.
 
 ```text
 Installing collected packages: nvidia-cusparselt-cu13, mpmath, cuda-toolkit, websockets, uvloop, 
@@ -29,44 +31,58 @@ ERROR: Could not install packages due to an OSError: [Errno 28] No space left on
 Error: Process completed with exit code 1.
 ```
 
-### Root Cause
-1. In `apps/api/requirements.txt`, `torch>=2.2,<3.0` and `torchvision>=0.17,<1.0` are specified without restricting the PyPI wheel index.
-2. When pip installs PyTorch on Linux (`ubuntu-latest`) from standard PyPI, it defaults to GPU-enabled wheels bundling the complete NVIDIA CUDA runtime suite (`nvidia-cudnn-cu13`, `nvidia-cublas`, `nvidia-cusolver`, `nvidia-nccl-cu13`, `triton`, etc.).
-3. The compressed downloads exceed 4.5 GB and uncompress to over 10 GB of binaries in `site-packages` and `/tmp`.
-4. GitHub Actions standard hosted runners (`ubuntu-latest`) have approximately 14 GB of free root disk space. The combined pre-installed tools, system swap, Docker images, and PyTorch CUDA dependencies completely saturate the runner's disk, aborting with `[Errno 28] No space left on device`.
-5. GitHub Actions standard runners do not have GPUs, so installing 10 GB of Nvidia CUDA binaries is entirely superfluous.
+---
+
+## 2. Root Cause Analysis
+
+1. **Backend CUDA Bloat**: On standard Linux runners, `pip install -r requirements.txt` defaults to GPU-enabled PyTorch wheels with CUDA 13. The compressed downloads exceed 4.5 GB and unpack to over 10 GB. Standard GitHub Actions runners only have ~14 GB of free root disk space. Furthermore, pip cache (`cache: pip`) preserved large wheel fragments, exacerbating disk pressure.
+2. **Frontend Untracked Fixtures**: `.gitignore` contained `*.dcm` without an exception for synthetic public demo fixtures. As a result, git never checked out `apps/web/public/fixtures/dicom/brain-ct/slice-*.dcm`, causing `node scripts/verify-dicom-fixture.mjs` (`npm test`) to fail with `AssertionError: Missing DICOM fixture file`.
 
 ---
 
-## 2. Reproduction Steps
+## 3. Remediation Applied
 
-1. Trigger a push or pull request to GitHub running `.github/workflows/ci.yml`.
-2. Observe job `API lint and tests` downloading `nvidia-*` packages for ~3 minutes.
-3. Observe pip aborting during package extraction with `OSError: [Errno 28] No space left on device`.
+1. **Allow Synthetic Web Fixtures in `.gitignore`**:
+   ```gitignore
+   # Data and model artifacts: never commit study data or model weights by default
+   data/
+   *.dcm
+   !apps/web/public/fixtures/**/*.dcm
+   *.nii
+   ```
+   Tracked the 5 synthetic phantom slices in git (`~660 KB` total, zero patient data).
 
----
-
-## 3. Impact Analysis
-
-- **CI Pipeline Blocker**: All pull requests and commits fail automated regression tests on GitHub Actions.
-- **Build Latency**: Even before failing, downloading 4.5 GB of CUDA packages takes 3+ minutes of runner time.
-
----
-
-## 4. Remediation Applied
-
-Updated [`.github/workflows/ci.yml`](file:///Users/shine/Documents/Shine's%20Personal%20Folder/Code/Tel-U/radar-ai/.github/workflows/ci.yml) to install CPU-only PyTorch wheels from the official PyTorch wheel repository prior to installing `requirements.txt`:
-
-```yaml
-      - name: Install CPU-only PyTorch (avoids downloading 5GB+ CUDA wheels on CI runner)
-        run: python -m pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
-      - name: Install dependencies
-        run: python -m pip install -r requirements.txt
-```
+2. **Maximize Runner Disk Space & Enforce CPU PyTorch in `.github/workflows/ci.yml`**:
+   ```yaml
+     api:
+       name: API lint and tests
+       runs-on: ubuntu-latest
+       defaults:
+         run:
+           working-directory: apps/api
+       steps:
+         - name: Maximize runner disk space
+           run: |
+             sudo rm -rf /usr/share/dotnet
+             sudo rm -rf /usr/local/lib/android
+             sudo rm -rf /opt/ghc
+             sudo rm -rf /opt/hostedtoolcache/CodeQL
+         - uses: actions/checkout@v4
+         - uses: actions/setup-python@v5
+           with:
+             python-version: "3.12"
+         - name: Install dependencies (CPU-only PyTorch to prevent CUDA disk exhaustion)
+           run: |
+             python -m pip install --no-cache-dir --upgrade pip
+             python -m pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+             python -m pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+         - name: Lint
+           run: python -m ruff check .
+         - name: Test
+           run: python -m pytest
+   ```
 
 ### Verification & Benefits
-- **Disk Usage**: Reduced PyTorch download and installation footprint from ~10 GB down to ~180 MB (>97% reduction).
-- **CI Speed**: Installation completes in ~15 seconds instead of 3.5 minutes.
-- **Compatibility**: The CPU wheel satisfies `torch>=2.2,<3.0` and passes all 35 pytest test cases without downloading any `nvidia-*` dependencies.
-- **Web Test Parity**: Added `npm test` step to the `web` job for full automated test coverage in CI.
-
+- **Disk Space**: Removing pre-installed Android, .NET, and GHC toolchains reclaims **>25 GB** of disk space on the runner.
+- **CPU PyTorch**: Enforcing `--extra-index-url https://download.pytorch.org/whl/cpu` prevents pip from reinstalling the PyPI CUDA wheel.
+- **Web Verification**: `apps/web/public/fixtures/dicom/brain-ct/` now exists in repository checkouts, allowing `npm test` to pass seamlessly.
