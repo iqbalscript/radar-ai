@@ -61,11 +61,17 @@ To strictly honor [`docs/rsna-ich-licensing-and-profile.md`](./rsna-ich-licensin
 
 ---
 
-## 4. Handoff to Dependent Workstreams
+## 4. Handoff to Dependent Workstreams (Sprint 2 — RDA-4)
 
-- **API & Model Inference Workstream (`RDA-18`)**:
+- **API & Model Inference Workstream (`RDA-18` & `RDA-2`)**:
   - `StudyAnalysisResponse.study.slices[].slice_id` maps 1:1 to the ordered `dicomImageIds` stack on the frontend.
-  - When `findings[].evidence_slice_ids` cites a `slice_id`, the viewer defaults to the first cited slice on load, badges the slice in the scrubber (`★`), and projects the candidate ROI overlay when **Show AI Evidence Overlay** is active.
+  - When `findings[].evidence_slice_ids` cites a `slice_id`, [`StudyViewerClient.tsx`](../apps/web/components/StudyViewerClient.tsx) defaults to the first cited slice on load, badges the slice in the toolbar and quick-jump scrubber strip (`★`), and projects either the SAMIHS segmentation mask bounding box (`StudyLocalizations.slices[].box`) or the candidate ROI overlay when **Overlay Bukti AI** is active.
+  - Clicking any cited slice button (`★ Irisan #3 (1.5 mm)`) on a finding card or in the slice pill strip immediately navigates the viewport to that slice index (`setIndex`).
+  - Keyboard shortcuts (`ArrowLeft` / `ArrowRight`) and mouse-wheel scrubbing allow rapid slice traversal across the series.
+- **Model Version & Non-Diagnostic Guardrails**:
+  - The viewer displays `model_version` provenance (`provider`, `model_id`, `prompt_version`, `model_version_id`, checkpoint SHA-256, and compute device) in a dedicated metadata panel.
+  - All prediction scores are accompanied by explicit non-diagnostic notices (`DisclaimerBanner`, `Skor model riset · belum terkalibrasi · BUKAN DIAGNOSIS`) and never imply clinical diagnosis.
 - **Verification & Regeneration**:
   - Regenerate DICOM fixtures: `python3 scripts/generate_dicom_fixture.py`
   - Verify DICOM headers & HU calibration: `cd apps/web && npm test`
+  - TypeScript & ESLint verification: `cd apps/web && npm run typecheck && npm run lint`

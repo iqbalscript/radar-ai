@@ -615,6 +615,13 @@ export default function DashboardPage() {
                 Sinkron: {lastSyncedAt} WIB
               </span>
             )}
+            <Link
+              href="/studies/00000000-0000-4000-8000-000000000001"
+              className="button-secondary"
+              style={{ textDecoration: "none", fontSize: "0.84rem" }}
+            >
+              Buka Fixture CT-2026-0101 →
+            </Link>
             <button
               type="button"
               className="button-secondary"

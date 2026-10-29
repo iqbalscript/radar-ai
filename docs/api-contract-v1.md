@@ -58,9 +58,10 @@ DICOM UIDs, or image bytes. The dependent upload workstream handles DICOM valida
 image storage. OpenAPI exposes the route and request/response schemas at `/openapi.json`.
 
 `GET /v1/studies/{study_id}/slices/{slice_id}/image` renders a validated stored slice to a
-windowed PNG preview and sends `Cache-Control: private, no-store`. The preview route is intended
-for the local research UI; this prototype does not authenticate callers, so do not expose the API
-to an untrusted network.
+windowed PNG preview and sends `Cache-Control: private, no-store`.
+`GET /v1/studies/{study_id}/slices/{slice_id}/dicom` streams the validated stored Part 10 DICOM
+slice (`application/dicom`) with `Cache-Control: private, no-store` so the Cornerstone3D viewer
+can perform client-side Hounsfield Unit calibration and windowing on the exact uploaded slice.
 
 `GET /v1/studies/{study_id}/analysis` returns persisted findings in the v1 contract, or `404` if
 the study has no completed analysis. It never generates a placeholder finding. Review decisions

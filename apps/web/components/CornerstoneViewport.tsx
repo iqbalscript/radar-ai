@@ -11,6 +11,7 @@ import {
   utilities,
   type Types,
 } from "@cornerstonejs/core";
+import { apiFetch } from "@/lib/api-client";
 
 export interface WindowPreset {
   id: "brain" | "subdural" | "bone";
@@ -46,7 +47,7 @@ export interface ParsedDicomSlice {
   roiSampleHu: number;
 }
 
-interface CornerstoneViewportProps {
+export interface CornerstoneViewportProps {
   studyId: string;
   studyCode: string;
   modality: string;
@@ -58,6 +59,13 @@ interface CornerstoneViewportProps {
   isEvidenceSlice: boolean;
   currentSliceZ: number | null;
   currentAssetId: string;
+  localizationBox?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null;
+  slicePositiveScore?: number | null;
 }
 
 const parsedSliceCache = new Map<string, ParsedDicomSlice>();
@@ -69,7 +77,7 @@ async function parseDicomFromImageId(imageId: string): Promise<ParsedDicomSlice>
   if (cached) return cached;
 
   const url = imageId.replace(/^wadouri:/i, "");
-  const response = await fetch(url);
+  const response = url.startsWith("/v1/") ? await apiFetch(url) : await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch DICOM slice at ${url} (HTTP ${response.status})`);
   }
@@ -84,7 +92,6 @@ async function parseDicomFromImageId(imageId: string): Promise<ParsedDicomSlice>
   const rescaleSlope = parseFloat(dataSet.string("x00281053") ?? "1");
   const windowCenter = parseFloat(dataSet.string("x00281050") ?? "40");
   const windowWidth = parseFloat(dataSet.string("x00281051") ?? "80");
-  const sliceLocation = parseFloat(dataSet.string("x00201041") ?? "0");
 
   const spacingStr = dataSet.string("x00280030") ?? "0.9375\\0.9375";
   const spacingParts = spacingStr.split("\\").map((v: string) => parseFloat(v));
@@ -93,12 +100,17 @@ async function parseDicomFromImageId(imageId: string): Promise<ParsedDicomSlice>
     spacingParts[1] || 0.9375,
   ];
 
-  const posStr = dataSet.string("x00200032") ?? `-120\\-120\\${sliceLocation}`;
+  const rawSliceLocation = dataSet.string("x00201041");
+  const posStr = dataSet.string("x00200032") ?? `-120\\-120\\${rawSliceLocation ?? "0"}`;
   const imagePositionPatient = posStr.split("\\").map((v: string) => parseFloat(v) || 0) as [
     number,
     number,
     number,
   ];
+  const sliceLocation =
+    rawSliceLocation !== undefined
+      ? parseFloat(rawSliceLocation)
+      : (imagePositionPatient[2] ?? 0);
 
   const frameOfReferenceUID =
     dataSet.string("x00200052") ?? "1.2.826.0.1.3680043.8.498.2026.101.0";
@@ -108,6 +120,7 @@ async function parseDicomFromImageId(imageId: string): Promise<ParsedDicomSlice>
     throw new Error(`DICOM dataset ${url} is missing PixelData (7FE0,0010)`);
   }
 
+  const pixelRepresentation = dataSet.uint16("x00280103") ?? 0;
   const totalPixels = rows * columns;
   const huData = new Int16Array(totalPixels);
   const pixelView = new DataView(
@@ -117,7 +130,10 @@ async function parseDicomFromImageId(imageId: string): Promise<ParsedDicomSlice>
   );
 
   for (let i = 0; i < totalPixels; i++) {
-    const stored = pixelView.getUint16(i * 2, true);
+    const stored =
+      pixelRepresentation === 1
+        ? pixelView.getInt16(i * 2, true)
+        : pixelView.getUint16(i * 2, true);
     huData[i] = Math.round(stored * rescaleSlope + rescaleIntercept);
   }
 
@@ -137,14 +153,16 @@ async function parseDicomFromImageId(imageId: string): Promise<ParsedDicomSlice>
     windowWidth,
     sliceLocation,
     pixelSpacing,
-    patientName: dataSet.string("x00100010") ?? "ANONYMIZED^BRAIN^CT",
-    patientId: dataSet.string("x00100020") ?? "RADAR-CT-2026-0101",
-    modality: dataSet.string("x00080060") ?? "CT",
-    seriesDescription: dataSet.string("x0008103e") ?? "Non-Contrast Axial Brain CT",
-    sopInstanceUid: dataSet.string("x00080018") ?? "",
-    transferSyntaxUid: dataSet.string("x00020010") ?? "1.2.840.10008.1.2.1",
+    patientName: dataSet.string("x00100010")?.trim() || "ANONYMIZED",
+    patientId: dataSet.string("x00100020")?.trim() || "DEIDENTIFIED",
+    modality: dataSet.string("x00080060")?.trim() || "CT",
+    seriesDescription:
+      dataSet.string("x0008103e")?.trim() || "Non-Contrast Axial Brain CT",
+    sopInstanceUid: dataSet.string("x00080018")?.trim() || "",
+    transferSyntaxUid:
+      dataSet.string("x00020010")?.trim() || "1.2.840.10008.1.2.1",
     deidentificationMethod:
-      dataSet.string("x00120063") ?? "SYNTHETIC_MATHEMATICAL_PHANTOM",
+      dataSet.string("x00120063")?.trim() || "DEIDENTIFIED_RESEARCH_SERIES",
     roiSampleHu,
   };
 
@@ -242,6 +260,8 @@ export function CornerstoneViewport({
   isEvidenceSlice,
   currentSliceZ,
   currentAssetId,
+  localizationBox,
+  slicePositiveScore,
 }: CornerstoneViewportProps) {
   const csElementRef = useRef<HTMLDivElement | null>(null);
   const directCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -577,8 +597,45 @@ export function CornerstoneViewport({
           L
         </span>
 
+        {/* SAMIHS Mask Bounding Box Overlay (when provided by segmentation localizer) */}
+        {showOverlay && localizationBox && (
+          <div
+            data-testid="samihs-lesion-box"
+            title="SAMIHS Binary ICH Segmentation Envelope (Research Only)"
+            style={{
+              position: "absolute",
+              left: `${localizationBox.x * 100}%`,
+              top: `${localizationBox.y * 100}%`,
+              width: `${localizationBox.width * 100}%`,
+              height: `${localizationBox.height * 100}%`,
+              border: "2px solid #ffca55",
+              backgroundColor: "rgba(255, 202, 85, 0.14)",
+              boxShadow: "0 0 0 1px rgba(5, 8, 13, 0.85)",
+              pointerEvents: "none",
+            }}
+          >
+            <span
+              className="mono"
+              style={{
+                position: "absolute",
+                left: -2,
+                bottom: "calc(100% + 3px)",
+                whiteSpace: "nowrap",
+                backgroundColor: "#171b24",
+                color: "#ffe19a",
+                fontSize: "0.62rem",
+                fontWeight: 700,
+                padding: "2px 6px",
+                borderRadius: 4,
+              }}
+            >
+              Area mask ICH · riset
+            </span>
+          </div>
+        )}
+
         {/* AI Evidence ROI Candidate Bounding Annotation on Cited Slices */}
-        {isEvidenceSlice && showOverlay && parsedSlice && (
+        {isEvidenceSlice && showOverlay && !localizationBox && parsedSlice && (
           <div
             data-testid="ai-roi-overlay"
             title="AI Suspected ICH Candidate (Left Basal Ganglia, ~78 HU)"
@@ -642,6 +699,11 @@ export function CornerstoneViewport({
               SLICE: {activeSliceIdx + 1} / {imageIds.length} (IDX {activeSliceIdx})
             </div>
             <div>Z-POS: {currentSliceZ ?? parsedSlice?.sliceLocation ?? 0} mm</div>
+            {slicePositiveScore != null && (
+              <div style={{ color: "#38bdf8", fontWeight: 700 }}>
+                MODEL SCORE: {(slicePositiveScore * 100).toFixed(1)}% (NON-DIAGNOSTIC)
+              </div>
+            )}
             <div>
               {hoverProbe
                 ? `HU PROBE (${hoverProbe.x},${hoverProbe.y}): ${
@@ -657,7 +719,9 @@ export function CornerstoneViewport({
             DCM: {activeImageId.replace(/^wadouri:/, "")} • ASSET: {currentAssetId.slice(-6)}
           </div>
           <div style={{ color: "#fbbf24", fontWeight: 700 }}>
-            SYNTHETIC ANONYMIZED FIXTURE • NOT FOR CLINICAL USE
+            {parsedSlice?.deidentificationMethod.includes("SYNTHETIC")
+              ? "SYNTHETIC ANONYMIZED FIXTURE • NOT FOR CLINICAL USE"
+              : "ANONYMIZED RESEARCH CT • NOT FOR CLINICAL USE"}
           </div>
         </div>
       </div>

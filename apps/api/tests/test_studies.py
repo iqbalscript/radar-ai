@@ -314,3 +314,54 @@ def test_web_fixture_series_upload_and_study_list_status_transition(
     assert study_list[0]["status"] == "ready"
     assert len(study_list[0]["slices"]) == 5
 
+    analysis_resp = client.get(f"/v1/studies/{study_id}/analysis")
+    assert analysis_resp.status_code == 200
+    analysis = analysis_resp.json()
+    assert analysis["schema_version"] == "1.0.0"
+    assert analysis["model_version"]["provider"] == "demo_fixture"
+    assert analysis["model_version"]["model_id"] == "synthetic-fixture"
+    assert analysis["model_version"]["prompt_version"] == "demo-fixture-v1"
+    assert len(analysis["findings"]) == 1
+
+    finding = analysis["findings"][0]
+    expected_evidence_ids = {
+        updated["slices"][2]["slice_id"],
+        updated["slices"][3]["slice_id"],
+    }
+    assert set(finding["evidence_slice_ids"]) == expected_evidence_ids
+    assert finding["review_status"] == "pending"
+
+    preview_resp = client.get(
+        f"/v1/studies/{study_id}/slices/{updated['slices'][2]['slice_id']}/image"
+    )
+    assert preview_resp.status_code == 200
+    assert preview_resp.headers["content-type"] == "image/png"
+
+    dicom_resp = client.get(
+        f"/v1/studies/{study_id}/slices/{updated['slices'][4]['slice_id']}/dicom"
+    )
+    assert dicom_resp.status_code == 200
+    assert dicom_resp.headers["content-type"] == "application/dicom"
+    assert dicom_resp.content == fixture_files[4].read_bytes()
+
+    review_resp = client.post(
+        f"/v1/studies/{study_id}/findings/{finding['finding_id']}/review",
+        json={"review_status": "accepted"},
+    )
+    assert review_resp.status_code == 201
+    assert review_resp.json()["previous_review_status"] == "pending"
+    assert review_resp.json()["review_status"] == "accepted"
+
+    # Uploading slice-4.dcm alone (Z=11.5mm, normal convexity) yields 0 findings
+    single_study_id = create_study()
+    single_upload = client.post(
+        f"/v1/studies/{single_study_id}/dicom",
+        files=[("files", ("slice-4.dcm", fixture_files[4].read_bytes(), "application/dicom"))],
+    )
+    assert single_upload.status_code == 201
+    single_analysis = client.get(f"/v1/studies/{single_study_id}/analysis")
+    assert single_analysis.status_code == 200
+    assert single_analysis.json()["findings"] == []
+    assert single_analysis.json()["model_version"]["provider"] == "demo_fixture"
+
+

@@ -27,6 +27,7 @@ class ValidatedDicom:
     instance_number: int | None
     rows: int
     columns: int
+    is_synthetic_fixture: bool = False
 
 
 IDENTIFYING_KEYWORDS = frozenset(
@@ -310,6 +311,7 @@ def validate_ct_slice(path: Path, *, max_pixels: int) -> ValidatedDicom:
             instance_number=instance_number,
             rows=rows,
             columns=columns,
+            is_synthetic_fixture=is_synthetic_phantom_fixture,
         )
     except DicomValidationError:
         raise

@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
@@ -10,6 +11,12 @@ import type {
   FindingReviewStatus,
 } from "@radar-ai/contracts";
 import { useAuth } from "@/components/AuthContext";
+import { ReviewStatusBadge, StudyStatusBadge } from "@/components/ClinicalBadge";
+import {
+  CRANIAL_WINDOW_PRESETS,
+  type WindowPreset,
+} from "@/components/CornerstoneViewport";
+import { DisclaimerBanner } from "@/components/DisclaimerBanner";
 import {
   API_BASE,
   apiFetch,
@@ -17,6 +24,21 @@ import {
   fetchAuthenticatedImageBlobUrl,
   isValidUuid,
 } from "@/lib/api-client";
+import { getDemoStudyById, type DemoStudyEntry } from "@/lib/demo-data";
+
+const CornerstoneViewport = dynamic(
+  () => import("@/components/CornerstoneViewport"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="ct-canvas-placeholder" role="status">
+        <p className="muted-copy">Memuat mesin Cornerstone3D DICOM Part 10…</p>
+      </div>
+    ),
+  }
+);
+
+type ViewerRenderMode = "dicom" | "preview";
 
 async function fetchModelScores(studyId: string): Promise<StudyModelScores> {
   const safeId = assertValidUuid(studyId, "Study ID");
@@ -41,6 +63,7 @@ async function fetchStudyLocalizations(studyId: string): Promise<StudyLocalizati
 export function StudyViewerClient({ studyId }: { studyId: string }) {
   const { user, authRequired } = useAuth();
   const [study, setStudy] = useState<Study | null>(null);
+  const [demoEntry, setDemoEntry] = useState<DemoStudyEntry | null>(null);
   const [analysis, setAnalysis] = useState<StudyAnalysisResponse | null>(null);
   const [modelScores, setModelScores] = useState<StudyModelScores | null>(null);
   const [localizations, setLocalizations] = useState<StudyLocalizations | null>(null);
@@ -51,56 +74,185 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
   const [error, setError] = useState("");
   const [reviewError, setReviewError] = useState("");
   const [blobImage, setBlobImage] = useState<{ sliceId: string; url: string } | null>(null);
-  const slice = study?.slices[index];
-  const topCandidate = modelScores?.slices.reduce((best, current) =>
-    current.class_1_score > best.class_1_score ? current : best,
+
+  // Viewer interactive controls
+  const [viewerMode, setViewerMode] = useState<ViewerRenderMode>("dicom");
+  const [windowPreset, setWindowPreset] = useState<WindowPreset>(
+    CRANIAL_WINDOW_PRESETS[0]
   );
-  const activeSliceScore = modelScores?.slices.find((item) => item.index === index);
-  const activeLocalization = localizations?.slices.find((item) => item.index === index);
+  const [showOverlay, setShowOverlay] = useState(true);
+
+  const slice = study?.slices[index];
+
+  // Safe reduction for top positive slice score (BUG-01 remediation)
+  const topCandidate = useMemo(() => {
+    if (!modelScores?.slices || modelScores.slices.length === 0) return null;
+    return modelScores.slices.reduce((best, current) =>
+      current.class_1_score > best.class_1_score ? current : best
+    );
+  }, [modelScores]);
+
+  const activeSliceScore = useMemo(
+    () => modelScores?.slices.find((item) => item.index === index) ?? null,
+    [modelScores, index]
+  );
+
+  const activeLocalization = useMemo(
+    () => localizations?.slices.find((item) => item.index === index) ?? null,
+    [localizations, index]
+  );
+
+  // Compute set of cited evidence slice IDs across all findings
+  const citedSliceIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!analysis?.findings) return ids;
+    for (const finding of analysis.findings) {
+      for (const sliceId of finding.evidence_slice_ids) {
+        ids.add(sliceId);
+      }
+    }
+    return ids;
+  }, [analysis]);
+
+  const isActiveSliceEvidence = Boolean(
+    slice && (citedSliceIds.has(slice.slice_id) || topCandidate?.index === index)
+  );
+
+  const isSyntheticFixtureStudy = Boolean(
+    demoEntry || analysis?.model_version.provider === "demo_fixture"
+  );
+
+  // Map study slices to exact uploaded DICOM endpoints or local demo fixtures for Cornerstone3D
+  const dicomImageIds = useMemo(() => {
+    if (!study || study.slices.length === 0) return [];
+    if (demoEntry) {
+      return study.slices.map((_, sliceIdx) => {
+        const clampedFixtureIndex = Math.min(4, Math.max(0, sliceIdx));
+        return `wadouri:/fixtures/dicom/brain-ct/slice-${clampedFixtureIndex}.dcm`;
+      });
+    }
+    return study.slices.map(
+      (item) => `wadouri:/v1/studies/${study.study_id}/slices/${item.slice_id}/dicom`
+    );
+  }, [demoEntry, study]);
 
   const fallbackImageUrl = useMemo(() => {
     if (!slice || !isValidUuid(studyId) || !isValidUuid(slice.slice_id)) return "";
+    if (demoEntry) return "";
     return `${API_BASE}/v1/studies/${studyId}/slices/${slice.slice_id}/image`;
-  }, [slice, studyId]);
+  }, [slice, studyId, demoEntry]);
 
+  // Memory-safe Object URL management on rapid slice scrubbing (BUG-03 remediation)
   useEffect(() => {
-    if (!slice || !user) {
+    if (!slice || demoEntry) {
       return;
     }
     const targetSliceId = slice.slice_id;
     const controller = new AbortController();
-    let createdObjectUrl = "";
+    let isCancelled = false;
+    let activeUrl: string | null = null;
 
     fetchAuthenticatedImageBlobUrl(studyId, targetSliceId, controller.signal)
       .then((objectUrl) => {
-        createdObjectUrl = objectUrl;
+        if (isCancelled) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        activeUrl = objectUrl;
         setBlobImage({ sliceId: targetSliceId, url: objectUrl });
       })
       .catch(() => {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && !isCancelled) {
           setBlobImage(null);
         }
       });
 
     return () => {
+      isCancelled = true;
       controller.abort();
-      if (createdObjectUrl) {
-        URL.revokeObjectURL(createdObjectUrl);
+      if (activeUrl) {
+        URL.revokeObjectURL(activeUrl);
       }
     };
-  }, [slice, studyId, user]);
+  }, [slice, studyId, user, demoEntry]);
+
+  // Keyboard navigation (Left / Right arrows) for slice traversal
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!study || study.slices.length === 0) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "SELECT" ||
+          target.tagName === "TEXTAREA")
+      ) {
+        return;
+      }
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        setIndex((current) => Math.max(0, current - 1));
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        setIndex((current) => Math.min(study.slices.length - 1, current + 1));
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [study]);
 
   const activeImageUrl =
-    user && slice && blobImage?.sliceId === slice.slice_id
+    slice && blobImage?.sliceId === slice.slice_id
       ? blobImage.url
       : fallbackImageUrl;
+
+  const resolveInitialSliceIndex = useCallback(
+    (targetStudy: Study, targetAnalysis: StudyAnalysisResponse | null): number => {
+      if (targetStudy.slices.length === 0) return 0;
+      const firstCitedId = targetAnalysis?.findings[0]?.evidence_slice_ids[0];
+      if (firstCitedId) {
+        const citedIndex = targetStudy.slices.findIndex(
+          (item) => item.slice_id === firstCitedId
+        );
+        if (citedIndex >= 0) return citedIndex;
+      }
+      return 0;
+    },
+    []
+  );
+
+  const applyDemoFallback = useCallback(
+    (matchedDemo: DemoStudyEntry) => {
+      const demoStudy = matchedDemo.analysis.study;
+      setDemoEntry(matchedDemo);
+      setStudy(demoStudy);
+      setAnalysis(matchedDemo.analysis);
+      setViewerMode("dicom");
+      setIndex(resolveInitialSliceIndex(demoStudy, matchedDemo.analysis));
+      setModelScores(null);
+      setLocalizations(null);
+      setScoreError(
+        "Studi ini adalah fixture sintetik lokal (demo_fixture). Skor model real-time memerlukan studi terunggah dengan RADAR_CT_CHECKPOINT."
+      );
+      setLocalizationError(
+        "Lokalisasi SAMIHS real-time memerlukan volume seri CT yang diunggah ke penyimpanan API lokal."
+      );
+      setError("");
+    },
+    [resolveInitialSliceIndex]
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
+    const matchedDemo = getDemoStudyById(studyId);
     try {
       const safeStudyId = assertValidUuid(studyId, "Study ID");
       const response = await apiFetch(`/v1/studies/${safeStudyId}`);
+      if (response.status === 404 && matchedDemo) {
+        applyDemoFallback(matchedDemo);
+        return;
+      }
       if (response.status === 401) {
         throw new Error(
           "Autentikasi diperlukan untuk membuka studi ini. Silakan login terlebih dahulu."
@@ -108,21 +260,34 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
       }
       if (response.status === 404) throw new Error("Studi tidak ditemukan.");
       if (!response.ok) throw new Error(`API returned ${response.status}`);
+
       const value = (await response.json()) as Study;
+      setDemoEntry(null);
       setStudy(value);
-      setIndex((current) => Math.min(current, Math.max(0, value.slices.length - 1)));
+      setViewerMode("dicom");
+
       const analysisResponse = await apiFetch(`/v1/studies/${safeStudyId}/analysis`);
-      setAnalysis(
-        analysisResponse.ok
-          ? ((await analysisResponse.json()) as StudyAnalysisResponse)
-          : null
-      );
+      const resolvedAnalysis = analysisResponse.ok
+        ? ((await analysisResponse.json()) as StudyAnalysisResponse)
+        : null;
+      setAnalysis(resolvedAnalysis);
+      setIndex(resolveInitialSliceIndex(value, resolvedAnalysis));
+
       setModelScores(null);
       setLocalizations(null);
       setScoreError("");
       setLocalizationError("");
+
       void fetchModelScores(safeStudyId)
-        .then(setModelScores)
+        .then((scores) => {
+          setModelScores(scores);
+          if (!resolvedAnalysis?.findings.length && scores.slices.length > 0) {
+            const best = scores.slices.reduce((a, b) =>
+              b.class_1_score > a.class_1_score ? b : a
+            );
+            setIndex((current) => (current === 0 ? best.index : current));
+          }
+        })
         .catch((cause: unknown) =>
           setScoreError(
             cause instanceof Error ? cause.message : "Skor model tidak tersedia."
@@ -136,18 +301,29 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
           )
         );
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Tidak dapat memuat studi.");
+      if (matchedDemo) {
+        applyDemoFallback(matchedDemo);
+      } else {
+        setError(cause instanceof Error ? cause.message : "Tidak dapat memuat studi.");
+      }
     } finally {
       setLoading(false);
     }
-  }, [studyId]);
+  }, [studyId, applyDemoFallback, resolveInitialSliceIndex]);
 
   useEffect(() => {
     let ignore = false;
     async function fetchStudy() {
+      const matchedDemo = getDemoStudyById(studyId);
       try {
         const safeStudyId = assertValidUuid(studyId, "Study ID");
         const response = await apiFetch(`/v1/studies/${safeStudyId}`);
+        if (response.status === 404 && matchedDemo) {
+          if (!ignore) {
+            applyDemoFallback(matchedDemo);
+          }
+          return;
+        }
         if (response.status === 401) {
           throw new Error(
             "Autentikasi diperlukan untuk membuka studi ini. Silakan login terlebih dahulu."
@@ -155,27 +331,37 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
         }
         if (response.status === 404) throw new Error("Studi tidak ditemukan.");
         if (!response.ok) throw new Error(`API returned ${response.status}`);
+
         const value = (await response.json()) as Study;
+        const analysisResponse = await apiFetch(`/v1/studies/${safeStudyId}/analysis`);
+        const resolvedAnalysis = analysisResponse.ok
+          ? ((await analysisResponse.json()) as StudyAnalysisResponse)
+          : null;
+
         if (!ignore) {
+          setDemoEntry(null);
           setStudy(value);
-          setIndex((current) => Math.min(current, Math.max(0, value.slices.length - 1)));
+          setAnalysis(resolvedAnalysis);
+          setViewerMode("dicom");
+          setIndex(resolveInitialSliceIndex(value, resolvedAnalysis));
           setError("");
           setModelScores(null);
           setLocalizations(null);
           setScoreError("");
           setLocalizationError("");
         }
-        const analysisResponse = await apiFetch(`/v1/studies/${safeStudyId}/analysis`);
-        if (!ignore) {
-          setAnalysis(
-            analysisResponse.ok
-              ? ((await analysisResponse.json()) as StudyAnalysisResponse)
-              : null
-          );
-        }
+
         void fetchModelScores(safeStudyId)
           .then((scores) => {
-            if (!ignore) setModelScores(scores);
+            if (!ignore) {
+              setModelScores(scores);
+              if (!resolvedAnalysis?.findings.length && scores.slices.length > 0) {
+                const best = scores.slices.reduce((a, b) =>
+                  b.class_1_score > a.class_1_score ? b : a
+                );
+                setIndex((current) => (current === 0 ? best.index : current));
+              }
+            }
           })
           .catch((cause: unknown) => {
             if (!ignore) {
@@ -197,7 +383,13 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
           });
       } catch (cause) {
         if (!ignore) {
-          setError(cause instanceof Error ? cause.message : "Tidak dapat memuat studi.");
+          if (matchedDemo) {
+            applyDemoFallback(matchedDemo);
+          } else {
+            setError(
+              cause instanceof Error ? cause.message : "Tidak dapat memuat studi."
+            );
+          }
         }
       } finally {
         if (!ignore) {
@@ -209,11 +401,25 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
     return () => {
       ignore = true;
     };
-  }, [studyId, user]);
+  }, [studyId, user, applyDemoFallback, resolveInitialSliceIndex]);
 
   async function recordReview(findingId: string, review_status: FindingReviewStatus) {
     setReviewError("");
-    if (authRequired && !user) {
+    if (demoEntry && analysis) {
+      setAnalysis({
+        ...analysis,
+        findings: analysis.findings.map((finding) =>
+          finding.finding_id === findingId
+            ? { ...finding, review_status }
+            : finding
+        ),
+      });
+      return;
+    }
+    const hasConfiguredApiKey = Boolean(
+      (process.env.NEXT_PUBLIC_RADAR_API_KEY ?? "").trim()
+    );
+    if (authRequired && !user && !hasConfiguredApiKey) {
       setReviewError(
         "Silakan login dengan akun peneliti (Firebase OAuth) untuk mencatat keputusan review."
       );
@@ -258,121 +464,665 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
     }
   }
 
+  const studyCode =
+    demoEntry?.code ?? `CT-${study?.study_id.slice(0, 8).toUpperCase() ?? "STUDY"}`;
+
   return (
     <div className="viewer-shell">
-      <nav className="breadcrumbs" aria-label="Breadcrumb"><Link href="/">← Kembali ke daftar studi</Link></nav>
-      {loading && <p role="status">Memuat studi…</p>}
-      {error && <div className="notice notice-error" role="alert">{error}<button className="button-secondary" onClick={() => void load()}>Coba lagi</button></div>}
+      <DisclaimerBanner />
+
+      <nav className="breadcrumbs viewer-breadcrumbs" aria-label="Breadcrumb">
+        <Link href="/">← Kembali ke daftar studi</Link>
+        <div className="breadcrumb-quick-links">
+          <span className="muted-copy">Fixture Referensi:</span>
+          <Link
+            href="/studies/00000000-0000-4000-8000-000000000001"
+            className="evidence-link"
+          >
+            CT-2026-0101 (5 Irisan DICOM)
+          </Link>
+        </div>
+      </nav>
+
+      {loading && <p role="status">Memuat studi dan referensi irisan…</p>}
+
+      {error && (
+        <div className="notice notice-error" role="alert">
+          {error}{" "}
+          <button
+            className="button-secondary"
+            type="button"
+            onClick={() => void load()}
+          >
+            Coba lagi
+          </button>
+        </div>
+      )}
+
       {study && (
         <>
           <header className="viewer-heading">
-            <div><p className="eyebrow">ANONYMIZED CT STUDY</p><h1>Study {study.study_id.slice(0, 8).toUpperCase()}</h1><p>{study.modality} · {study.slices.length} irisan</p></div>
-            <span className={`status-pill status-${study.status}`}>{study.status}</span>
+            <div>
+              <p className="eyebrow">
+                ANONYMIZED CT STUDY{" "}
+                <span>· PROTOTYPING ONLY · NOT FOR CLINICAL USE</span>
+              </p>
+              <h1>Study {studyCode}</h1>
+              <p>
+                {study.modality} · {study.slices.length} irisan
+                {demoEntry ? ` · ${demoEntry.seriesDescription}` : ""}
+              </p>
+            </div>
+            <div className="viewer-header-badges">
+              {isSyntheticFixtureStudy && (
+                <span className="badge badge-warning mono">
+                  DEMO FIXTURE · SYNTHETIC PHANTOM
+                </span>
+              )}
+              <StudyStatusBadge status={study.status} />
+              <span className={`status-pill status-${study.status}`}>
+                {study.status}
+              </span>
+            </div>
           </header>
+
           <div className="viewer-grid">
             <section className="image-panel" aria-label="CT slice viewer">
-              <div className="image-toolbar"><span>SLICE {slice ? index + 1 : 0} / {study.slices.length}</span><span>{slice?.z_position_mm == null ? "Z position unavailable" : `Z ${slice.z_position_mm} mm`}</span></div>
+              {/* Top Viewer Controls: Mode Switcher, Window Presets & Overlay Toggle */}
+              <div className="viewer-controls-bar">
+                <div
+                  className="viewer-mode-tabs"
+                  role="tablist"
+                  aria-label="Pilih mode perenderan CT"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={viewerMode === "dicom"}
+                    disabled={!slice}
+                    title="Render irisan DICOM Part 10 asli dengan probe Hounsfield Unit & preset windowing"
+                    className={`viewer-mode-tab${viewerMode === "dicom" ? " active" : ""}`}
+                    onClick={() => setViewerMode("dicom")}
+                  >
+                    Cornerstone3D DICOM (HU Probe)
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={viewerMode === "preview"}
+                    className={`viewer-mode-tab${viewerMode === "preview" ? " active" : ""}`}
+                    onClick={() => setViewerMode("preview")}
+                  >
+                    Irisan Asli Studi (API PNG)
+                  </button>
+                </div>
+
+                <div className="viewer-preset-controls">
+                  {viewerMode === "dicom" && (
+                    <div
+                      className="window-preset-group"
+                      role="group"
+                      aria-label="Preset Window/Level CT"
+                    >
+                      {CRANIAL_WINDOW_PRESETS.map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          className={`preset-pill${
+                            windowPreset.id === preset.id ? " active" : ""
+                          }`}
+                          onClick={() => setWindowPreset(preset)}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  <label className="overlay-toggle-label">
+                    <input
+                      type="checkbox"
+                      checked={showOverlay}
+                      onChange={(event) => setShowOverlay(event.target.checked)}
+                    />
+                    <span>Overlay Bukti AI</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Active Slice Telemetry Bar */}
+              <div className="image-toolbar">
+                <div className="toolbar-slice-info">
+                  <span>
+                    SLICE {slice ? index + 1 : 0} / {study.slices.length}
+                  </span>
+                  {slice && citedSliceIds.has(slice.slice_id) && (
+                    <span className="evidence-slice-badge">
+                      ★ BUKTI TEMUAN TERKAIT
+                    </span>
+                  )}
+                  {topCandidate && topCandidate.index === index && (
+                    <span className="candidate-slice-badge">
+                      ◆ KANDIDAT SKOR TERTINGGI
+                    </span>
+                  )}
+                </div>
+                <div className="toolbar-slice-meta">
+                  <span>
+                    {slice?.z_position_mm == null
+                      ? "Z position unavailable"
+                      : `Z ${slice.z_position_mm} mm`}
+                  </span>
+                  {slice && (
+                    <span className="mono">
+                      REF: {slice.slice_id.slice(0, 8)}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Main Viewport Stage */}
               <div className="image-stage">
                 {slice ? (
                   <>
-                    <div className="ct-image-frame" style={activeLocalization ? { aspectRatio: `${activeLocalization.image_width} / ${activeLocalization.image_height}` } : undefined}>
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={activeImageUrl} alt={`Anonymized CT slice ${index + 1} of ${study.slices.length}`} />
-                      {activeLocalization?.box && <div className="ct-lesion-box" style={{
-                        left: `${activeLocalization.box.x * 100}%`,
-                        top: `${activeLocalization.box.y * 100}%`,
-                        width: `${activeLocalization.box.width * 100}%`,
-                        height: `${activeLocalization.box.height * 100}%`,
-                      }}><span>Area mask ICH · riset</span></div>}
-                    </div>
-                    {activeSliceScore && <div className={`ct-model-label${topCandidate?.index === index ? " ct-model-label-candidate" : ""}`} role="status" aria-live="polite">
-                      <strong>{topCandidate?.index === index ? "KANDIDAT LABEL POSITIF ICH" : "SKOR LABEL POSITIF ICH"}</strong>
-                      <span>{(activeSliceScore.class_1_score * 100).toFixed(1)}%</span>
-                      <small>Skor model · bukan diagnosis</small>
-                    </div>}
+                    {viewerMode === "dicom" ? (
+                      <div className="cornerstone-stage-wrapper">
+                        <CornerstoneViewport
+                          studyId={study.study_id}
+                          studyCode={studyCode}
+                          modality={study.modality}
+                          imageIds={dicomImageIds}
+                          activeSliceIdx={index}
+                          onSliceChange={setIndex}
+                          windowPreset={windowPreset}
+                          showOverlay={showOverlay}
+                          isEvidenceSlice={isActiveSliceEvidence}
+                          currentSliceZ={slice.z_position_mm}
+                          currentAssetId={slice.image_asset_id}
+                          localizationBox={activeLocalization?.box ?? null}
+                          slicePositiveScore={
+                            activeSliceScore?.class_1_score ??
+                            (citedSliceIds.has(slice.slice_id)
+                              ? analysis?.findings[0]?.confidence ?? null
+                              : null)
+                          }
+                        />
+                      </div>
+                    ) : (
+                      <div
+                        className="ct-image-frame"
+                        style={
+                          activeLocalization
+                            ? {
+                                aspectRatio: `${activeLocalization.image_width} / ${activeLocalization.image_height}`,
+                              }
+                            : undefined
+                        }
+                      >
+                        {activeImageUrl ? (
+                          <>
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={activeImageUrl}
+                              alt={`Anonymized CT slice ${index + 1} of ${study.slices.length}`}
+                            />
+                            {showOverlay && activeLocalization?.box && (
+                              <div
+                                className="ct-lesion-box"
+                                style={{
+                                  left: `${activeLocalization.box.x * 100}%`,
+                                  top: `${activeLocalization.box.y * 100}%`,
+                                  width: `${activeLocalization.box.width * 100}%`,
+                                  height: `${activeLocalization.box.height * 100}%`,
+                                }}
+                              >
+                                <span>Area mask ICH · riset</span>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <div className="preview-fallback-box">
+                            <p>
+                              Pratinjau PNG backend memerlukan irisan yang disimpan di server API.
+                            </p>
+                            <button
+                              type="button"
+                              className="button-secondary"
+                              onClick={() => setViewerMode("dicom")}
+                            >
+                              Buka di Cornerstone3D DICOM Viewport
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Image-Linked Prediction Badge (Strictly Non-Diagnostic) */}
+                    {(activeSliceScore ||
+                      (slice && citedSliceIds.has(slice.slice_id))) && (
+                      <div
+                        className={`ct-model-label${
+                          topCandidate?.index === index ||
+                          (slice && citedSliceIds.has(slice.slice_id))
+                            ? " ct-model-label-candidate"
+                            : ""
+                        }`}
+                        role="status"
+                        aria-live="polite"
+                      >
+                        <strong>
+                          {topCandidate?.index === index
+                            ? "KANDIDAT LABEL POSITIF ICH TERTINGGI"
+                            : slice && citedSliceIds.has(slice.slice_id)
+                              ? "IRISAN BUKTI PREDIKSI MODEL (CITED)"
+                              : "SKOR LABEL POSITIF ICH"}
+                        </strong>
+                        <span>
+                          {activeSliceScore
+                            ? `${(activeSliceScore.class_1_score * 100).toFixed(1)}%`
+                            : analysis?.findings[0]
+                              ? `${(analysis.findings[0].confidence * 100).toFixed(0)}%`
+                              : "—"}
+                        </span>
+                        <small>
+                          Skor model riset · belum terkalibrasi · BUKAN DIAGNOSIS
+                        </small>
+                      </div>
+                    )}
                   </>
                 ) : (
                   <p>Studi ini belum memiliki irisan.</p>
                 )}
               </div>
+
+              {/* Slice Navigation Controls & Evidence Scrubber */}
               <div className="slice-controls">
-                <button className="button-secondary" type="button" disabled={!slice || index === 0} onClick={() => setIndex((n) => Math.max(0, n - 1))}>Irisan sebelumnya</button>
-                <label htmlFor="slice-index">Irisan <strong>{slice ? index + 1 : 0}</strong> dari {study.slices.length}</label>
-                <button className="button-secondary" type="button" disabled={!slice || index >= study.slices.length - 1} onClick={() => setIndex((n) => Math.min(study.slices.length - 1, n + 1))}>Irisan berikutnya</button>
-                <input id="slice-index" type="range" min={0} max={Math.max(0, study.slices.length - 1)} value={index} disabled={!slice} onChange={(event) => setIndex(Number(event.target.value))} aria-label="Pilih irisan CT" />
+                <button
+                  className="button-secondary"
+                  type="button"
+                  disabled={!slice || index === 0}
+                  onClick={() => setIndex((n) => Math.max(0, n - 1))}
+                >
+                  ← Irisan sebelumnya
+                </button>
+                <label htmlFor="slice-index">
+                  Irisan <strong>{slice ? index + 1 : 0}</strong> dari{" "}
+                  {study.slices.length}
+                  {slice?.z_position_mm != null && (
+                    <span className="slice-z-inline">
+                      {" "}
+                      (Z: {slice.z_position_mm} mm)
+                    </span>
+                  )}
+                </label>
+                <button
+                  className="button-secondary"
+                  type="button"
+                  disabled={!slice || index >= study.slices.length - 1}
+                  onClick={() =>
+                    setIndex((n) => Math.min(study.slices.length - 1, n + 1))
+                  }
+                >
+                  Irisan berikutnya →
+                </button>
+                <input
+                  id="slice-index"
+                  type="range"
+                  min={0}
+                  max={Math.max(0, study.slices.length - 1)}
+                  value={index}
+                  disabled={!slice}
+                  onChange={(event) => setIndex(Number(event.target.value))}
+                  aria-label="Pilih irisan CT"
+                />
+
+                {/* Direct Slice Reference Strip with Evidence Badging */}
+                {study.slices.length > 0 && (
+                  <div
+                    className="slice-pill-strip"
+                    role="group"
+                    aria-label="Navigasi langsung ke referensi irisan"
+                  >
+                    {study.slices.map((item, idx) => {
+                      const isCited = citedSliceIds.has(item.slice_id);
+                      const isTopScore = topCandidate?.index === idx;
+                      const isActive = idx === index;
+                      return (
+                        <button
+                          key={item.slice_id}
+                          type="button"
+                          className={`slice-pill-btn${isActive ? " active" : ""}${
+                            isCited || isTopScore ? " evidence" : ""
+                          }`}
+                          onClick={() => setIndex(idx)}
+                          title={`Irisan #${idx + 1} (${
+                            item.z_position_mm ?? 0
+                          } mm)${isCited ? " — Irisan Bukti AI" : ""}`}
+                        >
+                          <span>#{idx + 1}</span>
+                          {isCited && <span aria-hidden="true">★</span>}
+                          {!isCited && isTopScore && (
+                            <span aria-hidden="true">◆</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </section>
-            <aside className="review-panel">
-              <p className="eyebrow">ANALYSIS & REVIEW</p>
-              <h2>Skor model (riset)</h2>
-              {modelScores ? (() => {
-                const topSlice = modelScores.slices.reduce((best, current) =>
-                  current.class_1_score > best.class_1_score ? current : best,
-                );
-                return <article className="finding-card">
-                  <h3>Skor label positif ICH tertinggi</h3>
-                  <p>Skor model untuk label dataset positif: {(topSlice.class_1_score * 100).toFixed(1)}% · irisan #{topSlice.index + 1}</p>
-                  <p className="muted-copy">Label dataset negatif: {(topSlice.class_0_score * 100).toFixed(1)}% · positif: {(topSlice.class_1_score * 100).toFixed(1)}%</p>
-                  <button className="evidence-link" type="button" onClick={() => setIndex(topSlice.index)}>Lihat irisan skor tertinggi</button>
-                  <p className="muted-copy">Label 1 berarti irisan dianotasi mengandung perdarahan pada dataset RSNA ICH; label 0 berarti tidak ada anotasi positif. Ini skor model per irisan, bukan akurasi atau diagnosis; skor belum terkalibrasi.</p>
-                  <p className="muted-copy">{modelScores.model_id} · {modelScores.device} · checkpoint {modelScores.checkpoint_sha256.slice(0, 12)}</p>
-                </article>;
-              })() : <div className="notice notice-warning" role="status">
-                <strong>{scoreError ? "Inference belum tersedia." : "Menjalankan inference lokal…"}</strong>
-                {scoreError && <><br />{scoreError}</>}
-              </div>}
-              <h3>Lokalisasi area oleh SAMIHS</h3>
-              {localizations ? (() => {
-                const candidates = localizations.slices.filter((item) => item.box !== null);
-                const largest = candidates.reduce<(typeof candidates)[number] | null>(
-                  (best, current) => !best || current.mask_pixels > best.mask_pixels ? current : best,
-                  null,
-                );
-                return <article className="finding-card">
-                  {largest ? <>
-                    <p>Mask menemukan area kandidat pada {candidates.length} irisan. Kotak mengikuti batas area mask irisan, bukan diagnosis.</p>
-                    <button className="evidence-link" type="button" onClick={() => setIndex(largest.index)}>Lihat area mask terbesar · irisan #{largest.index + 1}</button>
-                  </> : study.slices.length < 16
-                    ? <p>Studi ini hanya berisi {study.slices.length} irisan. Paket model ditujukan untuk volume CT otak sekitar 16–180 irisan; unggah seluruh seri, bukan satu irisan lepas.</p>
-                    : <p>Model tidak menghasilkan area mask pada seri ini pada threshold yang dipilih.</p>}
-                  <p className="muted-copy">{localizations.model_id} · {localizations.device} · threshold {localizations.threshold} · checkpoint {localizations.checkpoint_sha256.slice(0, 12)}</p>
-                </article>;
-              })() : <div className="notice notice-warning" role="status">
-                <strong>{localizationError ? "Lokalisasi belum tersedia." : "Menjalankan model lokalisasi lokal…"}</strong>
-                {localizationError && <><br />{localizationError}</>}
-              </div>}
+
+            {/* Right Sidebar: Inference Findings, Slice Scores, Localizations & Model Version */}
+            <aside className="review-panel" aria-label="Panel analisis dan temuan model">
+              <p className="eyebrow">ANALYSIS & SLICE-LINKED FINDINGS</p>
+              <h2>Prediksi Model & Referensi Irisan</h2>
+              <p className="non-diagnostic-callout">
+                <strong>PERINGATAN NON-DIAGNOSTIK:</strong> Output di bawah ini adalah
+                skor matematis eksperimental yang belum terkalibrasi. Jangan gunakan
+                untuk diagnosis klinis atau keputusan medis.
+              </p>
+
+              {/* 1. Persisted Findings & Cited Evidence Slices */}
               <h3>Kandidat model & temuan tersimpan</h3>
-              {reviewError && <div className="notice notice-error" role="alert">{reviewError}</div>}
-              {analysis?.findings.length ? analysis.findings.map((finding) => <article className="finding-card" key={finding.finding_id}>
-                <h3>Dugaan perdarahan intrakranial</h3>
-                <p>Skor model: {(finding.confidence * 100).toFixed(0)}% · belum terkalibrasi</p>
-                <p className="finding-evidence">Irisan bukti: {finding.evidence_slice_ids.map((sliceId) => {
-                  const evidenceIndex = study.slices.findIndex((item) => item.slice_id === sliceId);
-                  return <button key={sliceId} type="button" className="evidence-link" onClick={() => evidenceIndex >= 0 && setIndex(evidenceIndex)}>#{evidenceIndex + 1}</button>;
-              })}</p>
-                <label htmlFor={`review-${finding.finding_id}`}>Keputusan reviewer</label>
-                <select id={`review-${finding.finding_id}`} value={finding.review_status} onChange={(event) => void recordReview(finding.finding_id, event.target.value as FindingReviewStatus)}>
-                  <option value="pending" disabled>Menunggu review</option><option value="accepted">Terima</option><option value="rejected">Tolak</option><option value="uncertain">Tidak pasti</option>
-                </select>
-              </article>) : modelScores ? (() => {
-                const candidate = modelScores.slices.reduce((best, current) =>
-                  current.class_1_score > best.class_1_score ? current : best,
-                );
-                return <article className="finding-card">
+              {reviewError && (
+                <div className="notice notice-error" role="alert">
+                  {reviewError}
+                </div>
+              )}
+
+              {analysis?.findings.length ? (
+                analysis.findings.map((finding) => (
+                  <article className="finding-card" key={finding.finding_id}>
+                    <div className="finding-card-header">
+                      <h3>Dugaan perdarahan intrakranial (ICH)</h3>
+                      <ReviewStatusBadge status={finding.review_status} />
+                    </div>
+                    <p>
+                      Skor prediksi model:{" "}
+                      <strong>{(finding.confidence * 100).toFixed(0)}%</strong> · belum
+                      terkalibrasi (bukan diagnosis)
+                    </p>
+                    <p className="muted-copy mono">
+                      Kategori: {finding.category} · Model Ver:{" "}
+                      {finding.model_version_id.slice(0, 8)}
+                    </p>
+                    <div className="finding-evidence">
+                      <span>Irisan bukti terkait:</span>
+                      {finding.evidence_slice_ids.map((sliceId) => {
+                        const evidenceIndex = study.slices.findIndex(
+                          (item) => item.slice_id === sliceId
+                        );
+                        const evidenceSlice =
+                          evidenceIndex >= 0 ? study.slices[evidenceIndex] : null;
+                        const isCurrent = evidenceIndex === index;
+                        return (
+                          <button
+                            key={sliceId}
+                            type="button"
+                            className={`evidence-link${isCurrent ? " active" : ""}`}
+                            onClick={() =>
+                              evidenceIndex >= 0 && setIndex(evidenceIndex)
+                            }
+                          >
+                            ★ Irisan #{evidenceIndex + 1}
+                            {evidenceSlice?.z_position_mm != null
+                              ? ` (${evidenceSlice.z_position_mm} mm)`
+                              : ""}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <label htmlFor={`review-${finding.finding_id}`}>
+                      Keputusan reviewer (audit manusia)
+                    </label>
+                    <select
+                      id={`review-${finding.finding_id}`}
+                      value={finding.review_status}
+                      onChange={(event) =>
+                        void recordReview(
+                          finding.finding_id,
+                          event.target.value as FindingReviewStatus
+                        )
+                      }
+                    >
+                      <option value="pending" disabled>
+                        Menunggu review
+                      </option>
+                      <option value="accepted">Terima (Accepted)</option>
+                      <option value="rejected">Tolak (Rejected)</option>
+                      <option value="uncertain">Tidak pasti (Uncertain)</option>
+                    </select>
+                  </article>
+                ))
+              ) : topCandidate ? (
+                <article className="finding-card">
                   <h3>Kandidat skor tertinggi · belum ditinjau</h3>
-                  <p>Skor model untuk label positif ICH: {(candidate.class_1_score * 100).toFixed(1)}% · irisan #{candidate.index + 1}</p>
-                  <button className="evidence-link" type="button" onClick={() => setIndex(candidate.index)}>Buka irisan kandidat</button>
-                  <p className="muted-copy">Diturunkan langsung dari skor inference model untuk target anotasi RSNA ICH. Belum disimpan sebagai temuan dan belum ditinjau reviewer. Skor ini bukan diagnosis atau akurasi model.</p>
-                </article>;
-              })() : <div className="notice notice-warning" role="status">{scoreError ? "Kandidat model belum tersedia karena inference gagal." : "Memuat skor inference untuk menampilkan kandidat model…"}</div>}
-              <p className="muted-copy">Semua skor model bersifat eksperimental dan tidak terkalibrasi. Hasil memerlukan peninjauan manusia.</p>
-              {analysis && <p className="muted-copy">Model: {analysis.model_version.provider} · {analysis.model_version.model_id} · {analysis.model_version.prompt_version}</p>}
-              <dl className="study-metadata"><div><dt>Status pipeline</dt><dd>{study.status}</dd></div><div><dt>Provider</dt><dd>{analysis?.model_version.provider ?? "Belum dikonfigurasi"}</dd></div><div><dt>Reviewer aktif</dt><dd>{user?.email ?? "local-reviewer"}</dd></div></dl>
+                  <p>
+                    Skor model untuk label positif ICH:{" "}
+                    <strong>{(topCandidate.class_1_score * 100).toFixed(1)}%</strong> ·
+                    irisan #{topCandidate.index + 1}
+                  </p>
+                  <button
+                    className="evidence-link"
+                    type="button"
+                    onClick={() => setIndex(topCandidate.index)}
+                  >
+                    ◆ Buka irisan kandidat (#{topCandidate.index + 1})
+                  </button>
+                  <p className="muted-copy">
+                    Diturunkan langsung dari skor inference model untuk target anotasi
+                    RSNA ICH. Belum disimpan sebagai temuan dan belum ditinjau reviewer.
+                    Skor ini bukan diagnosis atau akurasi model.
+                  </p>
+                </article>
+              ) : (
+                <div className="notice notice-warning" role="status">
+                  {isSyntheticFixtureStudy && analysis?.findings.length === 0
+                    ? "Tidak ada kandidat perdarahan yang ditandai pada irisan studi ini."
+                    : scoreError
+                      ? "Kandidat model belum tersedia karena inference lokal belum aktif."
+                      : "Memuat skor inference untuk menampilkan kandidat model…"}
+                </div>
+              )}
+
+              {/* 2. Per-Slice DenseNet121 Model Scores */}
+              <h3>Skor model per irisan (riset)</h3>
+              {modelScores ? (
+                topCandidate ? (
+                  <article className="finding-card">
+                    <h3>Skor label positif ICH tertinggi</h3>
+                    <p>
+                      Skor model untuk label dataset positif:{" "}
+                      <strong>{(topCandidate.class_1_score * 100).toFixed(1)}%</strong>{" "}
+                      · irisan #{topCandidate.index + 1}
+                    </p>
+                    <p className="muted-copy">
+                      Label dataset negatif:{" "}
+                      {(topCandidate.class_0_score * 100).toFixed(1)}% · positif:{" "}
+                      {(topCandidate.class_1_score * 100).toFixed(1)}%
+                    </p>
+                    {activeSliceScore && (
+                      <p className="muted-copy">
+                        Irisan aktif (#{index + 1}): positif{" "}
+                        <strong>
+                          {(activeSliceScore.class_1_score * 100).toFixed(1)}%
+                        </strong>{" "}
+                        · negatif {(activeSliceScore.class_0_score * 100).toFixed(1)}%
+                      </p>
+                    )}
+                    <button
+                      className="evidence-link"
+                      type="button"
+                      onClick={() => setIndex(topCandidate.index)}
+                    >
+                      Lihat irisan skor tertinggi (#{topCandidate.index + 1})
+                    </button>
+                    <p className="muted-copy">
+                      Label 1 berarti irisan dianotasi mengandung perdarahan pada
+                      dataset RSNA ICH; label 0 berarti tidak ada anotasi positif. Ini
+                      skor model per irisan, bukan akurasi atau diagnosis; skor belum
+                      terkalibrasi.
+                    </p>
+                    <p className="muted-copy mono">
+                      {modelScores.model_id} · {modelScores.device} · checkpoint{" "}
+                      {modelScores.checkpoint_sha256.slice(0, 12)}
+                    </p>
+                  </article>
+                ) : (
+                  <p className="muted-copy">Tidak ada skor irisan tersedia.</p>
+                )
+              ) : (
+                <div className="notice notice-warning" role="status">
+                  <strong>
+                    {scoreError
+                      ? "Skor per-irisan DenseNet121 belum tersedia."
+                      : "Menjalankan inference lokal…"}
+                  </strong>
+                  {scoreError && (
+                    <>
+                      <br />
+                      {scoreError}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* 3. SAMIHS Segmentation Localization */}
+              <h3>Lokalisasi area oleh SAMIHS</h3>
+              {localizations ? (
+                (() => {
+                  const candidates = localizations.slices.filter(
+                    (item) => item.box !== null
+                  );
+                  const largest = candidates.reduce<
+                    (typeof candidates)[number] | null
+                  >(
+                    (best, current) =>
+                      !best || current.mask_pixels > best.mask_pixels
+                        ? current
+                        : best,
+                    null
+                  );
+                  return (
+                    <article className="finding-card">
+                      {largest ? (
+                        <>
+                          <p>
+                            Mask menemukan area kandidat pada {candidates.length}{" "}
+                            irisan. Kotak mengikuti batas area mask irisan, bukan
+                            diagnosis.
+                          </p>
+                          <button
+                            className="evidence-link"
+                            type="button"
+                            onClick={() => setIndex(largest.index)}
+                          >
+                            Lihat area mask terbesar · irisan #{largest.index + 1}
+                          </button>
+                        </>
+                      ) : study.slices.length < 16 ? (
+                        <p>
+                          Studi ini hanya berisi {study.slices.length} irisan. Paket
+                          model ditujukan untuk volume CT otak sekitar 16–180 irisan;
+                          unggah seluruh seri, bukan satu irisan lepas.
+                        </p>
+                      ) : (
+                        <p>
+                          Model tidak menghasilkan area mask pada seri ini pada
+                          threshold yang dipilih.
+                        </p>
+                      )}
+                      <p className="muted-copy mono">
+                        {localizations.model_id} · {localizations.device} · threshold{" "}
+                        {localizations.threshold} · checkpoint{" "}
+                        {localizations.checkpoint_sha256.slice(0, 12)}
+                      </p>
+                    </article>
+                  );
+                })()
+              ) : (
+                <div className="notice notice-warning" role="status">
+                  <strong>
+                    {localizationError
+                      ? "Lokalisasi mask SAMIHS belum tersedia."
+                      : "Menjalankan model lokalisasi lokal…"}
+                  </strong>
+                  {localizationError && (
+                    <>
+                      <br />
+                      {localizationError}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* 4. Model Version & Provenance Metadata */}
+              <h3>Versi Model & Provenance</h3>
+              <dl className="study-metadata">
+                <div>
+                  <dt>Status pipeline</dt>
+                  <dd>{study.status}</dd>
+                </div>
+                <div>
+                  <dt>Provider model</dt>
+                  <dd className="mono">
+                    {analysis?.model_version.provider ?? "local_checkpoint"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Model ID</dt>
+                  <dd className="mono">
+                    {analysis?.model_version.model_id ??
+                      modelScores?.model_id ??
+                      "densenet121-rsna-ich"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Versi prompt / skema</dt>
+                  <dd className="mono">
+                    {analysis?.model_version.prompt_version ??
+                      analysis?.schema_version ??
+                      "v1.0.0"}
+                  </dd>
+                </div>
+                {analysis?.model_version.model_version_id && (
+                  <div>
+                    <dt>Model Version Ref</dt>
+                    <dd className="mono">
+                      {analysis.model_version.model_version_id.slice(0, 12)}
+                    </dd>
+                  </div>
+                )}
+                {modelScores?.checkpoint_sha256 && (
+                  <div>
+                    <dt>Checkpoint SHA-256</dt>
+                    <dd className="mono">
+                      {modelScores.checkpoint_sha256.slice(0, 12)}
+                    </dd>
+                  </div>
+                )}
+                <div>
+                  <dt>Reviewer aktif</dt>
+                  <dd>{user?.email ?? "local-reviewer"}</dd>
+                </div>
+                <div>
+                  <dt>Klasifikasi penggunaan</dt>
+                  <dd className="safety-tag">NOT FOR CLINICAL USE</dd>
+                </div>
+              </dl>
+
+              <p className="muted-copy" style={{ marginTop: 14 }}>
+                Semua skor model bersifat eksperimental dan tidak terkalibrasi. Hasil
+                memerlukan peninjauan mandiri oleh klinisi yang berwenang.
+              </p>
             </aside>
           </div>
         </>
       )}
-      <p className="research-note">Riset saja, bukan untuk penggunaan klinis. Tinjau seluruh irisan secara mandiri.</p>
+      <p className="research-note">
+        Riset prototipe saja — BUKAN UNTUK PENGGUNAAN KLINIS (NOT FOR CLINICAL USE).
+        Tinjau seluruh irisan DICOM secara mandiri.
+      </p>
     </div>
   );
 }

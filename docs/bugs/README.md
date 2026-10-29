@@ -19,32 +19,45 @@ Each issue is classified by severity, root cause, reproduction steps, affected f
 
 | Bug ID | Title | Component | Severity | Status |
 | :--- | :--- | :--- | :---: | :---: |
-| **[BUG-01](./BUG-01-study-viewer-empty-slices-crash.md)** | `StudyViewerClient` runtime crash on empty model slices (`Reduce of empty array`) | Frontend (`apps/web`) | **P1 (High)** | Documented / Fix available |
-| **[BUG-02](./BUG-02-cornerstone-viewport-integration-gap.md)** | Orphaned `CornerstoneViewport` & documentation drift with `StudyViewerClient` | Frontend (`apps/web`) | **P2 (Medium)** | Documented |
-| **[BUG-03](./BUG-03-web-memory-leak-blob-url-cleanup.md)** | Object URL memory leak during rapid CT slice scrubbing | Frontend (`apps/web`) | **P2 (Medium)** | Documented / Fix available |
-| **[BUG-04](./BUG-04-missing-npm-test-script.md)** | Missing `npm test` script in `apps/web/package.json` | Tooling / CI | **P3 (Low)** | Documented / Fix available |
+| **[BUG-01](./BUG-01-study-viewer-empty-slices-crash.md)** | `StudyViewerClient` runtime crash on empty model slices (`Reduce of empty array`) | Frontend (`apps/web`) | **P1 (High)** | Resolved (RDA-4) |
+| **[BUG-02](./BUG-02-cornerstone-viewport-integration-gap.md)** | Orphaned `CornerstoneViewport` & documentation drift with `StudyViewerClient` | Frontend (`apps/web`) | **P2 (Medium)** | Resolved (RDA-4) |
+| **[BUG-03](./BUG-03-web-memory-leak-blob-url-cleanup.md)** | Object URL memory leak during rapid CT slice scrubbing | Frontend (`apps/web`) | **P2 (Medium)** | Resolved (RDA-4) |
+| **[BUG-04](./BUG-04-missing-npm-test-script.md)** | Missing `npm test` script in `apps/web/package.json` | Tooling / CI | **P3 (Low)** | Resolved (RDA-4) |
 | **[BUG-05](./BUG-05-edge-rate-limiter-in-memory-state.md)** | Ephemeral in-memory rate limiting state in serverless & distributed environments | Security / Middleware | **P2 (Medium)** | Documented |
 | **[BUG-06](./BUG-06-framework-deprecation-warnings.md)** | Next.js 16 `middleware` & Starlette `TestClient` deprecation warnings | Frameworks | **P3 (Low)** | Documented |
 | **[BUG-07](./BUG-07-dicom-rendering-edge-cases.md)** | Window width floating-point division by zero & redundant disk I/O in DICOM decoding | Backend (`apps/api`) | **P3 (Low)** | Documented / Fix available |
+| **[BUG-08](./BUG-08-unbounded-client-slice-cache-memory-leak.md)** | Unbounded client-side memory growth in `CornerstoneViewport` (`parsedSliceCache` & `customMetadataStore`) | Frontend (`apps/web`) | **P2 (Medium)** | Documented / Fix available |
+| **[BUG-09](./BUG-09-cornerstone-webgl-context-lifecycle.md)** | WebGL2 context leaks and unhandled context loss on rapid study switching in `CornerstoneViewport` | Frontend (`apps/web`) | **P2 (Medium)** | Documented / Fix available |
+| **[BUG-10](./BUG-10-api-rate-limiter-eviction-starvation.md)** | Sliding window rate limiter inactive bucket eviction starvation & process memory retention | Backend (`apps/api`) | **P2 (Medium)** | Documented / Fix available |
+| **[BUG-11](./BUG-11-dicom-slice-ordering-floating-precision.md)** | Sub-millimeter floating-point slice ordering key jitter in multi-slice DICOM upload | Backend (`apps/api`) | **P3 (Low)** | Documented / Fix available |
+| **[BUG-12](./BUG-12-viewer-slice-selection-race-condition.md)** | Race condition in `StudyViewerClient` initial slice selection vs async `fetchModelScores` | Frontend (`apps/web`) | **P3 (Low)** | Documented / Fix available |
 
 ---
 
 ## 3. Severity Definitions
 
 - **P1 (High)**: Causes uncaught runtime exceptions, page crashes, or data loss under valid or edge-case workflows.
-- **P2 (Medium)**: Architectural discrepancies, client-side resource leaks, or security bypasses in multi-instance/serverless production deployments.
-- **P3 (Low)**: Tooling mismatches, framework deprecation warnings, or performance overhead without immediate failure.
+- **P2 (Medium)**: Architectural discrepancies, client-side resource leaks, unhandled WebGL context loss, or security bypasses in multi-instance/serverless production deployments.
+- **P3 (Low)**: Tooling mismatches, framework deprecation warnings, sub-millimeter precision jitter, or UI scrubbing race conditions without fatal failure.
 
 ---
 
 ## 4. Remediation Priority Roadmap
 
-1. **Immediate (Sprint 2 Hardening)**:
-   - Patch `BUG-01` to safeguard `Array.prototype.reduce` in `StudyViewerClient.tsx` with initial values or guard clauses.
-   - Patch `BUG-03` to revoke abandoned Object URLs during async resolution.
-   - Patch `BUG-04` by adding `"test": "node scripts/verify-dicom-fixture.mjs"` to `apps/web/package.json`.
-2. **Next Sprint (Architecture & Viewer Enhancement)**:
-   - Resolve `BUG-02` by integrating `CornerstoneViewport` into `StudyViewerClient` to unlock interactive Hounsfield Unit probing.
-   - Resolve `BUG-05` by providing a distributed Redis/Upstash adapter for edge rate limiting in production.
-   - Resolve `BUG-06` by migrating `apps/web/middleware.ts` to `apps/web/proxy.ts`.
+1. **Sprint 2 Completed Hardening (Resolved)**:
+   - Patched `BUG-01`: Safeguarded `Array.prototype.reduce` in `StudyViewerClient.tsx` against empty slice arrays.
+   - Patched `BUG-02`: Integrated `CornerstoneViewport` into `StudyViewerClient` with dual-mode toggle and interactive HU probe.
+   - Patched `BUG-03`: Added cancellation tracking and revoked abandoned Object URLs during async slice image resolution.
+   - Patched `BUG-04`: Added `"test": "node scripts/verify-dicom-fixture.mjs"` to `apps/web/package.json`.
 
+2. **Next Sprint (Performance & Client Resource Optimization)**:
+   - Patch `BUG-08`: Implement bounded LRU eviction (e.g. max 64 slices) for `parsedSliceCache` and `customMetadataStore` in `CornerstoneViewport.tsx`.
+   - Patch `BUG-09`: Explicitly invoke `engine.disableElement(viewportId)` before `engine.destroy()`, and handle `webglcontextlost`/`webglcontextrestored` events.
+   - Patch `BUG-10`: Add background/periodic sweep to evict inactive buckets from `SlidingWindowRateLimiter` in `security.py`.
+   - Patch `BUG-11`: Round `slice_position` to 3 decimal places (1 micron) before sorting uploaded slices in `main.py` and `dicom_validation.py`.
+   - Patch `BUG-12`: Add `userInteractedRef` in `StudyViewerClient.tsx` to prevent async `fetchModelScores` from snapping the active slice if the user manually browsed to slice 0.
+
+3. **Infrastructure & Production Readiness**:
+   - Resolve `BUG-05` by providing a distributed Redis/Upstash adapter for edge rate limiting in production.
+   - Resolve `BUG-06` by migrating `apps/web/middleware.ts` to `apps/web/proxy.ts` once Next.js 16 stabilizes the proxy convention.
+   - Resolve `BUG-07` by caching decoded DICOM datasets in memory to eliminate redundant disk reads between metadata and PNG rendering.

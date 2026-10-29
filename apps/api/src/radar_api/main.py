@@ -37,7 +37,9 @@ from radar_api.localization_service import (
     localize_dicom_series,
 )
 from radar_api.models import (
+    FindingEvidenceRecord,
     ImageAssetRecord,
+    ModelVersionRecord,
     PersistedFindingRecord,
     ReviewEventRecord,
     StudyAnalysisRecord,
@@ -454,6 +456,41 @@ def list_finding_reviews(
     )
 
 
+@app.get("/v1/studies/{study_id}/slices/{slice_id}/dicom", tags=["studies"])
+def get_slice_dicom(
+    study_id: UUID,
+    slice_id: UUID,
+    session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
+) -> Response:
+    """Stream one validated private CT slice as a non-cacheable Part 10 DICOM object."""
+
+    record = session.scalar(
+        select(StudySliceRecord)
+        .where(
+            StudySliceRecord.study_id == study_id,
+            StudySliceRecord.slice_id == slice_id,
+        )
+        .options(selectinload(StudySliceRecord.image_asset))
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="Study slice not found")
+
+    path = PrivateImageStore().path_for(record.image_asset.storage_key)
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise HTTPException(
+            status_code=422, detail="Stored DICOM slice cannot be read"
+        ) from error
+
+    return Response(
+        content=payload,
+        media_type="application/dicom",
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
 @app.get("/v1/studies/{study_id}/slices/{slice_id}/image", tags=["studies"])
 def get_slice_preview(
     study_id: UUID,
@@ -635,6 +672,56 @@ async def upload_dicom_series(
                     z_position_mm=metadata.z_position_mm,
                 )
             )
+
+        if validated and all(item.is_synthetic_fixture for item in validated):
+            fixture_model = session.scalar(
+                select(ModelVersionRecord).where(
+                    ModelVersionRecord.provider == "demo_fixture",
+                    ModelVersionRecord.model_id == "synthetic-fixture",
+                    ModelVersionRecord.prompt_version == "demo-fixture-v1",
+                )
+            )
+            if fixture_model is None:
+                fixture_model = ModelVersionRecord(
+                    model_version_id=uuid4(),
+                    provider="demo_fixture",
+                    model_id="synthetic-fixture",
+                    prompt_version="demo-fixture-v1",
+                )
+                session.add(fixture_model)
+                session.flush()
+
+            session.add(
+                StudyAnalysisRecord(
+                    analysis_id=uuid4(),
+                    study_id=study_id,
+                    model_version_id=fixture_model.model_version_id,
+                )
+            )
+            evidence_slices = [
+                item
+                for item in study.slices
+                if item.z_position_mm is not None and 0.0 < item.z_position_mm < 10.0
+            ]
+
+            if evidence_slices:
+                finding_id = uuid4()
+                finding = PersistedFindingRecord(
+                    finding_id=finding_id,
+                    study_id=study_id,
+                    category="suspected_intracranial_hemorrhage",
+                    confidence=0.84,
+                    review_status="pending",
+                    model_version_id=fixture_model.model_version_id,
+                )
+                for slice_record in evidence_slices:
+                    finding.evidence.append(
+                        FindingEvidenceRecord(
+                            finding_id=finding_id,
+                            slice_id=slice_record.slice_id,
+                        )
+                    )
+                session.add(finding)
 
         study.status = "ready"
         session.commit()
