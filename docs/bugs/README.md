@@ -31,6 +31,7 @@ Each issue is classified by severity, root cause, reproduction steps, affected f
 | **[BUG-10](./BUG-10-api-rate-limiter-eviction-starvation.md)** | Sliding window rate limiter inactive bucket eviction starvation & process memory retention | Backend (`apps/api`) | **P2 (Medium)** | Documented / Fix available |
 | **[BUG-11](./BUG-11-dicom-slice-ordering-floating-precision.md)** | Sub-millimeter floating-point slice ordering key jitter in multi-slice DICOM upload | Backend (`apps/api`) | **P3 (Low)** | Documented / Fix available |
 | **[BUG-12](./BUG-12-viewer-slice-selection-race-condition.md)** | Race condition in `StudyViewerClient` initial slice selection vs async `fetchModelScores` | Frontend (`apps/web`) | **P3 (Low)** | Documented / Fix available |
+| **[BUG-13](./BUG-13-ci-runner-disk-exhaustion-cuda-wheels.md)** | GitHub Actions CI runner disk exhaustion from full CUDA PyTorch wheels (`[Errno 28] No space left on device`) | Tooling / CI | **P2 (Medium)** | Resolved |
 
 ---
 
