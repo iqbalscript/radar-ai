@@ -36,13 +36,14 @@ jobs:
       run:
         working-directory: apps/api
     steps:
+      - uses: actions/checkout@v4
       - name: Maximize runner disk space
+        working-directory: .
         run: |
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
-      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
