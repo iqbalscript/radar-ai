@@ -4,11 +4,13 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     UniqueConstraint,
@@ -32,6 +34,7 @@ class StudyRecord(Base):
     study_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     modality: Mapped[str] = mapped_column(String(8), nullable=False, default="CT")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="uploaded")
+    owner_id: Mapped[str] = mapped_column(String(64), nullable=False, default="local-reviewer")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
@@ -96,11 +99,94 @@ class ModelVersionRecord(Base):
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     model_id: Mapped[str] = mapped_column(String(160), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    preprocessing_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    device: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
     findings: Mapped[list["PersistedFindingRecord"]] = relationship(back_populates="model_version")
     analyses: Mapped[list["StudyAnalysisRecord"]] = relationship(back_populates="model_version")
+    scores: Mapped[list["InferenceScoreRecord"]] = relationship(back_populates="model_version")
+
+
+class InferenceJobRecord(Base):
+    __tablename__ = "inference_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'processing', 'completed', 'failed')",
+            name="ck_inference_jobs_status",
+        ),
+        Index("ix_inference_jobs_study_created", "study_id", "created_at"),
+    )
+
+    job_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    study_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("studies.study_id", ondelete="CASCADE"), nullable=False
+    )
+    requested_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    error_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class InferenceScoreRecord(Base):
+    __tablename__ = "inference_scores"
+    __table_args__ = (
+        CheckConstraint("score >= 0 AND score <= 1", name="ck_inference_scores_range"),
+        UniqueConstraint(
+            "analysis_id", "slice_id", "subtype", name="uq_inference_score_analysis_slice"
+        ),
+    )
+
+    score_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    analysis_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("study_analyses.analysis_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    study_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("studies.study_id", ondelete="CASCADE"), nullable=False
+    )
+    slice_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("study_slices.slice_id", ondelete="CASCADE"), nullable=False
+    )
+    model_version_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("model_versions.model_version_id"), nullable=False
+    )
+    subtype: Mapped[str] = mapped_column(String(80), nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    model_version: Mapped[ModelVersionRecord] = relationship(back_populates="scores")
+
+
+class ReportDraftRecord(Base):
+    __tablename__ = "report_drafts"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'approved', 'rejected')", name="ck_report_drafts_status"
+        ),
+        UniqueConstraint("study_id", "version", name="uq_report_draft_version"),
+    )
+
+    report_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    study_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("studies.study_id", ondelete="CASCADE"), nullable=False
+    )
+    model_version_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("model_versions.model_version_id"), nullable=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft")
+    source_finding_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    content: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
 
 
 class StudyAnalysisRecord(Base):
@@ -145,6 +231,7 @@ class PersistedFindingRecord(Base):
     category: Mapped[str] = mapped_column(String(64), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     review_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     model_version_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("model_versions.model_version_id"), nullable=False
     )
@@ -193,6 +280,10 @@ class ReviewEventRecord(Base):
     )
     review_status: Mapped[str] = mapped_column(String(16), nullable=False)
     previous_review_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    action: Mapped[str] = mapped_column(String(16), nullable=False, default="review")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    previous_snapshot: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    current_snapshot: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
     reviewer: Mapped[str] = mapped_column(String(64), nullable=False, default="local-reviewer")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)

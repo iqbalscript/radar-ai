@@ -58,11 +58,16 @@ The shared API response contract is documented in [`docs/api-contract-v1.md`](do
 and served as JSON Schema at <http://localhost:8000/v1/contracts/study-analysis>.
 The web app lists saved studies, uploads anonymized DICOM series, and displays CT slice previews
 from the private API. Configure `RADAR_WEB_ORIGINS` for the local web origin when it differs from
-the defaults. Reviewer decisions are stored in an append-only event table; the current prototype
-uses a shared `local-reviewer` identity and does not provide authentication. Offline DenseNet121
-scoring is available through `apps/api/scripts/score_ct.py` when a compatible, locally provisioned
-six-label checkpoint is supplied. No checkpoint or reference CT fixtures are included, and this
-runner is not clinically validated; uploaded studies remain awaiting analysis.
+the defaults. In development, requests without credentials use the local `local-reviewer`
+principal. Production requires a verified Firebase token or server-held API key; study reads and
+writes are restricted to the authenticated study owner. Reviewer decisions are attributed to that
+identity in the append-only audit log. Offline DenseNet121 scoring is available through
+`apps/api/scripts/score_ct.py` when a compatible, locally provisioned checkpoint is supplied. The
+API runs inference as a pollable job and persists per-slice scores with checkpoint hash, model ID,
+preprocessing version, and device. No checkpoint is shipped, so operators must provision a
+validated research checkpoint before inference can complete. Meta report generation is optional;
+without a server-side `MODEL_API_KEY`, the API accepts a source-cited manual draft. This remains a
+research prototype, not for clinical use.
 
 ## Quality checks
 
@@ -91,12 +96,17 @@ GitHub Actions runs these checks for pull requests and pushes to `main`. CI does
 ## Scope and safety
 
 The project is an early research/demo prototype. Model outputs are experimental, require human review, and must not be used to diagnose, triage, or make treatment decisions. Follow the data license and privacy requirements before using any dataset.
+No repository software license has been provided yet; do not assume code reuse is licensed until the project owner selects and adds one.
 
 The RSNA Brain CT Hemorrhage dataset licensing assessment, source metadata manifest, and outstanding local profiling dependency are documented in [`docs/rsna-ich-licensing-and-profile.md`](docs/rsna-ich-licensing-and-profile.md) and [`docs/rsna-ich-source-manifest.json`](docs/rsna-ich-source-manifest.json). Dataset files and patient-level metadata must remain outside this repository.
 The Sprint 1 preprocessing, grouped split-manifest, memory budget, and dependent-workstream handoff are documented in [`docs/dicom-preprocessing-handoff.md`](docs/dicom-preprocessing-handoff.md).
 The offline DenseNet121 checkpoint contract, inference command, current validation evidence, and data/model handoff are documented in [`docs/ct-inference-handoff.md`](docs/ct-inference-handoff.md).
 The optional pretrained SAMIHS hemorrhage mask localizer, one-time offline provisioning, viewer boxes, and validation limits are documented in [`docs/ich-localization-handoff.md`](docs/ich-localization-handoff.md). It uses existing weights only; it does not train or fine-tune.
+The supported model scope, validation limits, provenance, and human oversight requirements are summarized in [`docs/model-card.md`](docs/model-card.md).
 The Cornerstone3D DICOM viewer integration, Hounsfield Unit voxel probing, cranial windowing presets, bidirectional slice-to-finding evidence linking, and non-diagnostic model provenance display are documented in [`docs/dicom-viewer-integration.md`](docs/dicom-viewer-integration.md).
 The findings sidebar, structured report editor, slice citation insertion, reviewer actions, and visible failure recovery are documented in [`docs/findings-report-editor-handoff.md`](docs/findings-report-editor-handoff.md).
+Backend container deployment, configuration, health checks, data volumes, and recovery steps are in [`docs/backend-deployment-runbook.md`](docs/backend-deployment-runbook.md).
+Release, licensing, deployment, and event-submission evidence is tracked in [`docs/release-checklist.md`](docs/release-checklist.md).
+Engineering workflow changes are summarized in [`docs/release-notes.md`](docs/release-notes.md).
 
 

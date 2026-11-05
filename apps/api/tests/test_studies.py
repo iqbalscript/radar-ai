@@ -1,3 +1,4 @@
+import time
 from collections.abc import Generator
 from io import BytesIO
 from pathlib import Path
@@ -15,9 +16,17 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from radar_api import inference_jobs
+from radar_api import main as main_module
+from radar_api.contracts import ReportContent
 from radar_api.database import Base, get_session
+from radar_api.inference_service import ModelUnavailableError
 from radar_api.main import app
-from radar_api.models import ImageAssetRecord
+from radar_api.models import (
+    ImageAssetRecord,
+    InferenceScoreRecord,
+)
+from radar_api.security import rate_limiter
 from radar_api.storage import PrivateImageStore
 
 engine = create_engine(
@@ -40,10 +49,23 @@ client = TestClient(app)
 def setup_function() -> None:
     app.dependency_overrides[get_session] = override_session
     Base.metadata.create_all(bind=engine)
+    rate_limiter.clear()
 
 
 def teardown_function() -> None:
+    rate_limiter.clear()
     Base.metadata.drop_all(bind=engine)
+
+
+def wait_for_job(study_id: str, job_id: str) -> dict[str, object]:
+    for _ in range(100):
+        response = client.get(f"/v1/studies/{study_id}/inference-jobs/{job_id}")
+        assert response.status_code == 200
+        result = response.json()
+        if result["status"] in {"completed", "failed"}:
+            return result
+        time.sleep(0.01)
+    raise AssertionError("Inference job did not finish within one second")
 
 
 def test_create_and_read_study() -> None:
@@ -274,12 +296,7 @@ def test_web_fixture_series_upload_and_study_list_status_transition(
     storage_root = tmp_path / "private"
     monkeypatch.setenv("RADAR_STORAGE_DIR", str(storage_root))
     fixture_dir = (
-        Path(__file__).resolve().parents[2]
-        / "web"
-        / "public"
-        / "fixtures"
-        / "dicom"
-        / "brain-ct"
+        Path(__file__).resolve().parents[2] / "web" / "public" / "fixtures" / "dicom" / "brain-ct"
     )
     fixture_files = sorted(fixture_dir.glob("slice-*.dcm"))
     assert len(fixture_files) == 5
@@ -292,8 +309,7 @@ def test_web_fixture_series_upload_and_study_list_status_transition(
     response = client.post(
         f"/v1/studies/{study_id}/dicom",
         files=[
-            ("files", (path.name, path.read_bytes(), "application/dicom"))
-            for path in fixture_files
+            ("files", (path.name, path.read_bytes(), "application/dicom")) for path in fixture_files
         ],
     )
     assert response.status_code == 201
@@ -365,3 +381,222 @@ def test_web_fixture_series_upload_and_study_list_status_transition(
     assert single_analysis.json()["model_version"]["provider"] == "demo_fixture"
 
 
+def test_inference_job_persists_slice_scores_and_model_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RADAR_STORAGE_DIR", str(tmp_path / "private"))
+    monkeypatch.setattr(inference_jobs, "SessionLocal", TestSession)
+    fixture_dir = (
+        Path(__file__).resolve().parents[2] / "web" / "public" / "fixtures" / "dicom" / "brain-ct"
+    )
+    fixture_files = sorted(fixture_dir.glob("slice-*.dcm"))
+    study_id = create_study()
+    upload = client.post(
+        f"/v1/studies/{study_id}/dicom",
+        files=[
+            ("files", (path.name, path.read_bytes(), "application/dicom")) for path in fixture_files
+        ],
+    )
+    assert upload.status_code == 201
+
+    monkeypatch.setattr(
+        inference_jobs,
+        "score_local_checkpoint",
+        lambda paths: {
+            "model_id": "test-densenet-v1",
+            "checkpoint_sha256": "a" * 64,
+            "device": "cpu",
+            "slices": [
+                {
+                    "file": path.name,
+                    "scores": {"0": 0.9 if index else 0.1, "1": 0.1 if index else 0.9},
+                }
+                for index, path in enumerate(paths)
+            ],
+        },
+    )
+    queued = client.post(f"/v1/studies/{study_id}/inference-jobs")
+    assert queued.status_code == 202
+    job = wait_for_job(study_id, queued.json()["job_id"])
+    assert job["status"] == "completed"
+
+    scores_response = client.get(f"/v1/studies/{study_id}/scores")
+    assert scores_response.status_code == 200
+    scores = scores_response.json()
+    assert scores["model_id"] == "test-densenet-v1"
+    assert scores["checkpoint_sha256"] == "a" * 64
+    assert len(scores["slices"]) == 5
+    assert scores["slices"][0]["class_1_score"] == 0.9
+
+    analysis_response = client.get(f"/v1/studies/{study_id}/analysis")
+    assert analysis_response.status_code == 200
+    analysis = analysis_response.json()
+    assert analysis["model_version"]["provider"] == "local_checkpoint"
+    assert analysis["model_version"]["preprocessing_version"] == "densenet121-ct-preprocessing/v2"
+    assert len(analysis["findings"]) == 1
+    assert analysis["findings"][0]["evidence_slice_ids"] == [scores["slices"][0]["slice_id"]]
+    with TestSession() as session:
+        assert len(list(session.scalars(select(InferenceScoreRecord)).all())) == 10
+
+
+def test_inference_job_records_model_unavailable_without_fake_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RADAR_STORAGE_DIR", str(tmp_path / "private"))
+    monkeypatch.setattr(inference_jobs, "SessionLocal", TestSession)
+    study_id = create_study()
+    upload = client.post(
+        f"/v1/studies/{study_id}/dicom",
+        files={"files": ("slice.dcm", make_ct_dicom(), "application/dicom")},
+    )
+    assert upload.status_code == 201
+
+    def no_model(_paths: list[Path]) -> dict[str, object]:
+        raise ModelUnavailableError("checkpoint unavailable")
+
+    monkeypatch.setattr(inference_jobs, "score_local_checkpoint", no_model)
+    queued = client.post(f"/v1/studies/{study_id}/inference-jobs")
+    assert queued.status_code == 202
+    job = wait_for_job(study_id, queued.json()["job_id"])
+    assert job["status"] == "failed"
+    assert job["error_code"] == "model_unavailable"
+    assert client.get(f"/v1/studies/{study_id}/analysis").status_code == 404
+    assert client.get(f"/v1/studies/{study_id}").json()["status"] == "failed"
+
+
+def test_manual_report_draft_is_versioned_and_rejects_unknown_citations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RADAR_STORAGE_DIR", str(tmp_path / "private"))
+    fixture_dir = (
+        Path(__file__).resolve().parents[2] / "web" / "public" / "fixtures" / "dicom" / "brain-ct"
+    )
+    fixture_files = sorted(fixture_dir.glob("slice-*.dcm"))
+    study_id = create_study()
+    upload = client.post(
+        f"/v1/studies/{study_id}/dicom",
+        files=[
+            ("files", (path.name, path.read_bytes(), "application/dicom")) for path in fixture_files
+        ],
+    )
+    assert upload.status_code == 201
+    finding_id = client.get(f"/v1/studies/{study_id}/analysis").json()["findings"][0]["finding_id"]
+    content = {
+        "findings": [{"text": "Synthetic source-cited draft.", "finding_ids": [finding_id]}],
+        "impression": {"text": "Requires human review.", "finding_ids": [finding_id]},
+        "limitations": "Research prototype; not for clinical use.",
+    }
+    saved = client.post(
+        f"/v1/studies/{study_id}/reports/drafts",
+        json={"manual_content": content},
+    )
+    assert saved.status_code == 201
+    assert saved.json()["generation_mode"] == "manual_fallback"
+    assert saved.json()["version"] == 1
+
+    invalid_content = {
+        **content,
+        "impression": {
+            "text": "Unsupported citation.",
+            "finding_ids": ["00000000-0000-4000-8000-000000000099"],
+        },
+    }
+    rejected = client.post(
+        f"/v1/studies/{study_id}/reports/drafts",
+        json={"manual_content": invalid_content},
+    )
+    assert rejected.status_code == 422
+    listed = client.get(f"/v1/studies/{study_id}/reports/drafts")
+    assert listed.status_code == 200
+    assert [item["version"] for item in listed.json()] == [1]
+
+
+def test_finding_correction_is_versioned_and_audited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RADAR_STORAGE_DIR", str(tmp_path / "private"))
+    fixture_dir = (
+        Path(__file__).resolve().parents[2] / "web" / "public" / "fixtures" / "dicom" / "brain-ct"
+    )
+    fixture_files = sorted(fixture_dir.glob("slice-*.dcm"))
+    study_id = create_study()
+    uploaded = client.post(
+        f"/v1/studies/{study_id}/dicom",
+        files=[
+            ("files", (path.name, path.read_bytes(), "application/dicom")) for path in fixture_files
+        ],
+    )
+    assert uploaded.status_code == 201
+    finding = client.get(f"/v1/studies/{study_id}/analysis").json()["findings"][0]
+    corrected = client.put(
+        f"/v1/studies/{study_id}/findings/{finding['finding_id']}",
+        json={
+            "confidence": 0.42,
+            "evidence_slice_ids": finding["evidence_slice_ids"],
+        },
+    )
+    assert corrected.status_code == 201
+    event = corrected.json()
+    assert event["action"] == "edit"
+    assert event["version"] == 2
+    assert event["review_status"] == "uncertain"
+    assert event["previous_snapshot"]["confidence"] == 0.84
+    assert event["current_snapshot"]["confidence"] == 0.42
+
+    reviews = client.get(f"/v1/studies/{study_id}/findings/{finding['finding_id']}/reviews")
+    assert reviews.status_code == 200
+    assert [item["version"] for item in reviews.json()] == [2]
+
+
+def test_meta_report_route_uses_only_deidentified_saved_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RADAR_STORAGE_DIR", str(tmp_path / "private"))
+    fixture_dir = (
+        Path(__file__).resolve().parents[2] / "web" / "public" / "fixtures" / "dicom" / "brain-ct"
+    )
+    fixture_files = sorted(fixture_dir.glob("slice-*.dcm"))
+    study_id = create_study()
+    uploaded = client.post(
+        f"/v1/studies/{study_id}/dicom",
+        files=[
+            ("files", (path.name, path.read_bytes(), "application/dicom")) for path in fixture_files
+        ],
+    )
+    assert uploaded.status_code == 201
+    finding = client.get(f"/v1/studies/{study_id}/analysis").json()["findings"][0]
+    submitted_source: list[dict[str, object]] = []
+
+    def fake_meta_draft(source: list[dict[str, object]]) -> tuple[ReportContent, str]:
+        submitted_source.extend(source)
+        finding_id = source[0]["finding_id"]
+        return (
+            ReportContent.model_validate(
+                {
+                    "findings": [
+                        {"text": "Source-supported synthetic finding.", "finding_ids": [finding_id]}
+                    ],
+                    "impression": {
+                        "text": "Human review required.",
+                        "finding_ids": [finding_id],
+                    },
+                    "limitations": "Research prototype; not for clinical use.",
+                }
+            ),
+            "mock-meta-model",
+        )
+
+    monkeypatch.setattr(main_module, "generate_report_content", fake_meta_draft)
+    response = client.post(f"/v1/studies/{study_id}/reports/drafts", json={})
+    assert response.status_code == 201
+    assert response.json()["generation_mode"] == "meta_model_api"
+    assert response.json()["model_id"] == "mock-meta-model"
+    assert submitted_source == [
+        {
+            "finding_id": finding["finding_id"],
+            "category": "suspected_intracranial_hemorrhage",
+            "confidence": 0.84,
+            "review_status": "pending",
+            "evidence_slice_ids": finding["evidence_slice_ids"],
+        }
+    ]

@@ -113,6 +113,17 @@ def test_security_headers_and_rate_limit_headers_are_set() -> None:
     assert "X-RateLimit-Limit" in response.headers
     assert "X-RateLimit-Remaining" in response.headers
 
+    preflight = client.options(
+        "/v1/studies/00000000-0000-4000-8000-000000000001/findings/00000000-0000-4000-8000-000000000002",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "PUT",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+    assert preflight.status_code == 200
+    assert "PUT" in preflight.headers["access-control-allow-methods"]
+
 
 def test_auth_required_blocks_unauthenticated_requests_and_allows_api_key(
     monkeypatch: pytest.MonkeyPatch,
@@ -154,6 +165,13 @@ def test_hmac_session_and_firebase_oauth_record_authenticated_reviewer(
                 uid="uid-ext",
             )
             if token == "unauthorized-domain-token"
+            else Principal(
+                subject="firebase:uid-other",
+                auth_method="firebase_jwt",
+                email="other@telkomuniversity.ac.id",
+                uid="uid-other",
+            )
+            if token == "other-firebase-token"
             else None
         )
     )
@@ -178,7 +196,14 @@ def test_hmac_session_and_firebase_oauth_record_authenticated_reviewer(
     model_version_id = uuid4()
     finding_id = uuid4()
     with TestSession() as session:
-        session.add(StudyRecord(study_id=study_id, modality="CT", status="ready"))
+        session.add(
+            StudyRecord(
+                study_id=study_id,
+                modality="CT",
+                status="ready",
+                owner_id="firebase:uid-123",
+            )
+        )
         session.add(
             ModelVersionRecord(
                 model_version_id=model_version_id,
@@ -221,6 +246,12 @@ def test_hmac_session_and_firebase_oauth_record_authenticated_reviewer(
     )
     assert review_resp.status_code == 201
     assert review_resp.json()["reviewer"] == "researcher@telkomuniversity.ac.id"
+
+    other_owner_resp = client.get(
+        f"/v1/studies/{study_id}",
+        headers={"Authorization": "Bearer other-firebase-token"},
+    )
+    assert other_owner_resp.status_code == 404
 
     hmac_token = create_hmac_session_token(
         "reviewer-2",
