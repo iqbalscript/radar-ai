@@ -107,5 +107,6 @@ The Cornerstone3D DICOM viewer integration, Hounsfield Unit voxel probing, crani
 The findings sidebar, structured report editor, slice citation insertion, reviewer actions, and visible failure recovery are documented in [`docs/findings-report-editor-handoff.md`](docs/findings-report-editor-handoff.md).
 Backend container deployment, configuration, health checks, data volumes, and recovery steps are in [`docs/backend-deployment-runbook.md`](docs/backend-deployment-runbook.md).
 Release, licensing, deployment, and event-submission evidence is tracked in [`docs/release-checklist.md`](docs/release-checklist.md).
+Engineering workflow changes are summarized in [`docs/release-notes.md`](docs/release-notes.md).
 
 
