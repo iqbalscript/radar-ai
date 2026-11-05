@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import time
@@ -22,6 +23,8 @@ from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
+
+logger = logging.getLogger("radar_api.http")
 
 AuthMethod = Literal[
     "firebase_jwt",
@@ -579,6 +582,8 @@ def _rate_limit_for_request(path: str, method: str) -> tuple[str, int] | None:
 
     if method == "POST" and (path == "/v1/studies" or path.endswith("/dicom")):
         return "upload", _env_int("RADAR_UPLOAD_RATE_LIMIT_PER_MINUTE", 20)
+    if method == "POST" and path.endswith("/inference-jobs"):
+        return "inference", _env_int("RADAR_INFERENCE_RATE_LIMIT_PER_MINUTE", 30)
     if method == "GET" and (path.endswith("/scores") or path.endswith("/localizations")):
         return "inference", _env_int("RADAR_INFERENCE_RATE_LIMIT_PER_MINUTE", 30)
     return "general", _env_int("RADAR_RATE_LIMIT_PER_MINUTE", 120)
@@ -637,7 +642,13 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
 
         try:
             response = await call_next(request)
-        except Exception:
+        except Exception as error:
+            logger.error(
+                "Unhandled API exception request_id=%s method=%s exception=%s",
+                request_id,
+                request.method.upper(),
+                type(error).__name__,
+            )
             response = JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 content={"detail": "Internal server error"},

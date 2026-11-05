@@ -101,11 +101,6 @@ export async function apiFetch(
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const apiKey = (process.env.NEXT_PUBLIC_RADAR_API_KEY ?? "").trim();
-  if (apiKey && !headers.has("X-API-Key")) {
-    headers.set("X-API-Key", apiKey);
-  }
-
   return fetch(`${API_BASE}${path}`, {
     ...init,
     headers,
@@ -250,8 +245,6 @@ export async function uploadDicomSeriesWithProgress(
 ): Promise<Study> {
   const safeStudyId = assertValidUuid(studyId, "Study ID");
   const token = await getValidIdToken();
-  const apiKey = (process.env.NEXT_PUBLIC_RADAR_API_KEY ?? "").trim();
-
   const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
   const formData = new FormData();
   for (const file of files) {
@@ -265,10 +258,6 @@ export async function uploadDicomSeriesWithProgress(
     if (token) {
       xhr.setRequestHeader("Authorization", `Bearer ${token}`);
     }
-    if (apiKey) {
-      xhr.setRequestHeader("X-API-Key", apiKey);
-    }
-
     if (signal) {
       if (signal.aborted) {
         xhr.abort();

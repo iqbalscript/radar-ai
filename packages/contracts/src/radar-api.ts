@@ -24,9 +24,12 @@ export interface CreateStudyRequest {
 
 export interface ModelVersion {
   model_version_id: string;
-  provider: "meta_model_api" | "approved_alternate" | "demo_fixture";
+  provider: "meta_model_api" | "local_checkpoint" | "approved_alternate" | "demo_fixture";
   model_id: string;
   prompt_version: string;
+  preprocessing_version?: string | null;
+  artifact_sha256?: string | null;
+  device?: string | null;
 }
 
 export interface Finding {
@@ -36,6 +39,7 @@ export interface Finding {
   confidence: number;
   review_status: FindingReviewStatus;
   model_version_id: string;
+  revision?: number;
 }
 
 export interface StudyAnalysisResponse {
@@ -61,6 +65,16 @@ export interface StudyModelScores {
   score_semantics: "Uncalibrated RSNA ICH slice-label scores; not a diagnosis";
   class_1_label_semantics: "RSNA ICH slice label 1 means hemorrhage annotated present; research score only";
   slices: StudySliceScore[];
+}
+
+export interface InferenceJob {
+  job_id: string;
+  study_id: string;
+  status: "queued" | "processing" | "completed" | "failed";
+  error_code: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 export interface Box2D {
@@ -95,6 +109,10 @@ export interface FindingReviewEvent {
   finding_id: string;
   previous_review_status: FindingReviewStatus | null;
   review_status: Exclude<FindingReviewStatus, "pending">;
+  action: "review" | "edit";
+  version: number;
+  previous_snapshot: Record<string, unknown> | null;
+  current_snapshot: Record<string, unknown> | null;
   reviewer: string;
   created_at: string;
 }

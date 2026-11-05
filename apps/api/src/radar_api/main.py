@@ -1,36 +1,37 @@
+import logging
 from io import BytesIO
 from math import isclose
 from uuid import UUID, uuid4
 
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from PIL import Image
 from pydicom import dcmread
 from pydicom.errors import InvalidDicomError
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
 from radar_api.contracts import (
+    CreateReportDraftRequest,
     CreateStudyRequest,
+    FindingCorrectionRequest,
     FindingReviewEvent,
     FindingReviewRequest,
+    InferenceJob,
+    ReportDraft,
     Study,
     StudyAnalysisResponse,
     StudyLocalizations,
     StudyModelScores,
     StudySliceScore,
 )
-from radar_api.database import get_session
+from radar_api.database import SessionLocal, get_session
 from radar_api.dicom_upload import UploadLimits, UploadTooLarge, stage_upload
 from radar_api.dicom_validation import DicomValidationError, validate_ct_slice
-from radar_api.inference_service import (
-    ModelUnavailableError,
-    StudyScoringError,
-    score_local_checkpoint,
-)
+from radar_api.inference_jobs import run_inference_job
 from radar_api.localization_service import (
     LocalizationInputError,
     LocalizationUnavailableError,
@@ -39,12 +40,21 @@ from radar_api.localization_service import (
 from radar_api.models import (
     FindingEvidenceRecord,
     ImageAssetRecord,
+    InferenceJobRecord,
+    InferenceScoreRecord,
     ModelVersionRecord,
     PersistedFindingRecord,
+    ReportDraftRecord,
     ReviewEventRecord,
     StudyAnalysisRecord,
     StudyRecord,
     StudySliceRecord,
+)
+from radar_api.report_service import (
+    REPORT_PROMPT_VERSION,
+    ReportModelUnavailable,
+    ReportOutputError,
+    generate_report_content,
 )
 from radar_api.security import (
     Principal,
@@ -56,6 +66,7 @@ from radar_api.security import (
 from radar_api.storage import PrivateImageStore
 
 load_dotenv()
+logger = logging.getLogger("radar_api")
 
 # Guard against Pillow decompression bombs on malformed images.
 Image.MAX_IMAGE_PIXELS = 16_777_216
@@ -71,7 +82,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_web_origins(),
     allow_credentials=False,
-    allow_methods=["DELETE", "GET", "POST", "OPTIONS"],
+    allow_methods=["DELETE", "GET", "POST", "PUT", "OPTIONS"],
     allow_headers=[
         "Authorization",
         "Content-Type",
@@ -89,9 +100,38 @@ app.add_middleware(
 )
 
 
+def require_owned_study(
+    study_id: UUID,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_authenticated_principal),
+) -> Principal:
+    """Hide studies belonging to another researcher behind the same 404 response."""
+    owned_id = session.scalar(
+        select(StudyRecord.study_id).where(
+            StudyRecord.study_id == study_id,
+            StudyRecord.owner_id == principal.subject[:64],
+        )
+    )
+    if owned_id is None:
+        raise HTTPException(status_code=404, detail="Study not found")
+    return principal
+
+
 @app.get("/health", tags=["operations"])
 def health_check() -> dict[str, str]:
     return {"status": "ok", "environment": "research-prototype"}
+
+
+@app.get("/health/ready", tags=["operations"])
+def readiness_check() -> dict[str, str]:
+    """Check that the API process can reach its configured relational database."""
+    try:
+        with SessionLocal() as session:
+            session.execute(text("SELECT 1"))
+    except Exception as error:
+        logger.error("Readiness check failed with %s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="Database is unavailable") from error
+    return {"status": "ready", "database": "ok"}
 
 
 @app.get("/v1/auth/me", tags=["security"])
@@ -123,11 +163,13 @@ def study_analysis_contract() -> dict[str, object]:
 def create_study(
     request: CreateStudyRequest,
     session: Session = Depends(get_session),
-    _principal: Principal = Depends(require_authenticated_principal),
+    principal: Principal = Depends(require_authenticated_principal),
 ) -> StudyRecord:
     """Create an empty CT study record; DICOM upload is handled by a separate workstream."""
 
-    study = StudyRecord(modality=request.modality, status="uploaded")
+    study = StudyRecord(
+        modality=request.modality, status="uploaded", owner_id=principal.subject[:64]
+    )
     session.add(study)
     session.commit()
     session.refresh(study)
@@ -143,6 +185,7 @@ def list_studies(
 
     statement = (
         select(StudyRecord)
+        .where(StudyRecord.owner_id == _principal.subject[:64])
         .options(selectinload(StudyRecord.slices))
         .order_by(StudyRecord.created_at.desc(), StudyRecord.study_id)
     )
@@ -154,6 +197,7 @@ def get_study(
     study_id: UUID,
     session: Session = Depends(get_session),
     _principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
 ) -> StudyRecord:
     """Fetch one study and its ordered slice metadata."""
 
@@ -173,6 +217,7 @@ def delete_empty_study(
     study_id: UUID,
     session: Session = Depends(get_session),
     _principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
 ) -> Response:
     """Remove only an empty study record created by an upload that did not complete."""
 
@@ -202,6 +247,7 @@ def get_study_analysis(
     study_id: UUID,
     session: Session = Depends(get_session),
     _principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
 ) -> dict:
     """Return persisted findings only; this endpoint never fabricates inference output."""
 
@@ -258,10 +304,169 @@ def get_study_analysis(
                 "confidence": item.confidence,
                 "review_status": item.review_status,
                 "model_version_id": item.model_version_id,
+                "revision": item.revision,
             }
             for item in findings
         ],
         "model_version": model_version,
+    }
+
+
+@app.get(
+    "/v1/studies/{study_id}/reports/drafts",
+    response_model=list[ReportDraft],
+    tags=["reports"],
+)
+def list_report_drafts(
+    study_id: UUID,
+    session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
+) -> list[dict[str, object]]:
+    records = list(
+        session.scalars(
+            select(ReportDraftRecord)
+            .where(ReportDraftRecord.study_id == study_id)
+            .order_by(ReportDraftRecord.version.desc())
+        ).all()
+    )
+    return [
+        {
+            "report_id": record.report_id,
+            "study_id": record.study_id,
+            "version": record.version,
+            "status": record.status,
+            "source_finding_ids": record.source_finding_ids,
+            "content": record.content,
+            "created_by": record.created_by,
+            "created_at": record.created_at,
+            "generation_mode": "meta_model_api" if record.model_version_id else "manual_fallback",
+            "model_id": (
+                session.get(ModelVersionRecord, record.model_version_id).model_id
+                if record.model_version_id
+                else None
+            ),
+        }
+        for record in records
+    ]
+
+
+@app.post(
+    "/v1/studies/{study_id}/reports/drafts",
+    response_model=ReportDraft,
+    status_code=status.HTTP_201_CREATED,
+    tags=["reports"],
+)
+def create_report_draft(
+    study_id: UUID,
+    request: CreateReportDraftRequest,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
+) -> dict[str, object]:
+    """Create a cited report draft from persisted findings or accept manual fallback content."""
+    analysis = session.scalar(
+        select(StudyAnalysisRecord)
+        .where(StudyAnalysisRecord.study_id == study_id)
+        .options(selectinload(StudyAnalysisRecord.model_version))
+        .order_by(StudyAnalysisRecord.created_at.desc(), StudyAnalysisRecord.analysis_id.desc())
+        .limit(1)
+    )
+    if analysis is None:
+        raise HTTPException(
+            status_code=409, detail="A completed analysis is required for a report draft"
+        )
+    findings = list(
+        session.scalars(
+            select(PersistedFindingRecord)
+            .where(
+                PersistedFindingRecord.study_id == study_id,
+                PersistedFindingRecord.model_version_id == analysis.model_version_id,
+            )
+            .options(selectinload(PersistedFindingRecord.evidence))
+            .order_by(PersistedFindingRecord.finding_id)
+        ).all()
+    )
+    if not findings:
+        raise HTTPException(
+            status_code=409, detail="No saved findings are available for a report draft"
+        )
+    finding_ids = {item.finding_id for item in findings}
+    manual = request.manual_content is not None
+    model_version = None
+    model_id = None
+    if manual:
+        content = request.manual_content
+    else:
+        source = [
+            {
+                "finding_id": str(item.finding_id),
+                "category": item.category,
+                "confidence": item.confidence,
+                "review_status": item.review_status,
+                "evidence_slice_ids": [str(link.slice_id) for link in item.evidence],
+            }
+            for item in findings
+        ]
+        try:
+            content, model_id = generate_report_content(source)
+        except ReportModelUnavailable as error:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Meta report generation is unavailable. Use manual_content to save a cited "
+                    "research draft, or configure MODEL_API_KEY on the API server."
+                ),
+            ) from error
+        except ReportOutputError as error:
+            raise HTTPException(
+                status_code=502, detail="Meta returned an invalid report draft"
+            ) from error
+        model_version = ModelVersionRecord(
+            provider="meta_model_api",
+            model_id=model_id,
+            prompt_version=REPORT_PROMPT_VERSION,
+        )
+        session.add(model_version)
+        session.flush()
+
+    assert content is not None
+    statements = [*content.findings, content.impression]
+    if any(not set(statement.finding_ids).issubset(finding_ids) for statement in statements):
+        raise HTTPException(
+            status_code=422,
+            detail="Report contains a citation that is not part of the current saved analysis",
+        )
+    latest_version = session.scalar(
+        select(ReportDraftRecord.version)
+        .where(ReportDraftRecord.study_id == study_id)
+        .order_by(ReportDraftRecord.version.desc())
+        .limit(1)
+    )
+    record = ReportDraftRecord(
+        report_id=uuid4(),
+        study_id=study_id,
+        model_version_id=model_version.model_version_id if model_version else None,
+        version=(latest_version or 0) + 1,
+        status="draft",
+        source_finding_ids=sorted(str(item) for item in finding_ids),
+        content=content.model_dump(mode="json"),
+        created_by=principal.reviewer_id,
+    )
+    session.add(record)
+    session.commit()
+    session.refresh(record)
+    return {
+        "report_id": record.report_id,
+        "study_id": record.study_id,
+        "version": record.version,
+        "status": record.status,
+        "source_finding_ids": record.source_finding_ids,
+        "content": record.content,
+        "created_by": record.created_by,
+        "created_at": record.created_at,
+        "generation_mode": "manual_fallback" if manual else "meta_model_api",
+        "model_id": model_id,
     }
 
 
@@ -274,8 +479,9 @@ def get_study_model_scores(
     study_id: UUID,
     session: Session = Depends(get_session),
     _principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
 ) -> dict[str, object]:
-    """Run the configured local binary checkpoint and return uncalibrated slice scores."""
+    """Return the latest persisted local scores; inference is started through a job endpoint."""
 
     study = session.scalar(
         select(StudyRecord)
@@ -284,49 +490,136 @@ def get_study_model_scores(
     )
     if study is None:
         raise HTTPException(status_code=404, detail="Study not found")
-    if not study.slices:
-        raise HTTPException(status_code=409, detail="Upload a CT series before requesting scores")
-
-    store = PrivateImageStore()
-    paths = [store.path_for(item.image_asset.storage_key) for item in study.slices]
-    try:
-        result = score_local_checkpoint(paths)
-    except ModelUnavailableError as error:
+    analysis = session.scalar(
+        select(StudyAnalysisRecord)
+        .where(StudyAnalysisRecord.study_id == study_id)
+        .options(selectinload(StudyAnalysisRecord.model_version))
+        .order_by(StudyAnalysisRecord.created_at.desc(), StudyAnalysisRecord.analysis_id.desc())
+        .limit(1)
+    )
+    if analysis is None or analysis.model_version.provider != "local_checkpoint":
         raise HTTPException(
-            status_code=503,
-            detail=(
-                "Local CT model unavailable. Configure RADAR_CT_CHECKPOINT and restart the API."
-            ),
-        ) from error
-    except StudyScoringError as error:
-        raise HTTPException(
-            status_code=422,
-            detail="Stored CT slices could not be scored by the configured model.",
-        ) from error
-
-    slice_scores = []
-    for image_slice, model_score in zip(study.slices, result["slices"], strict=True):
-        scores = model_score["scores"]
-        slice_scores.append(
-            StudySliceScore(
-                slice_id=image_slice.slice_id,
-                index=image_slice.index,
-                class_0_score=float(scores["0"]),
-                class_1_score=float(scores["1"]),
-            )
+            status_code=404,
+            detail="No completed local inference is available; submit an inference job first.",
         )
+    persisted = list(
+        session.scalars(
+            select(InferenceScoreRecord)
+            .where(InferenceScoreRecord.analysis_id == analysis.analysis_id)
+            .order_by(InferenceScoreRecord.slice_id, InferenceScoreRecord.subtype)
+        ).all()
+    )
+    by_slice: dict[UUID, dict[str, float]] = {}
+    for row in persisted:
+        by_slice.setdefault(row.slice_id, {})[row.subtype] = row.score
+    if any(
+        not {"hemorrhage_absent", "hemorrhage_present"}.issubset(by_slice.get(item.slice_id, {}))
+        for item in study.slices
+    ):
+        raise HTTPException(status_code=409, detail="Persisted inference scores are incomplete")
+    model = analysis.model_version
+    slice_scores = [
+        StudySliceScore(
+            slice_id=image_slice.slice_id,
+            index=image_slice.index,
+            class_0_score=by_slice[image_slice.slice_id]["hemorrhage_absent"],
+            class_1_score=by_slice[image_slice.slice_id]["hemorrhage_present"],
+        )
+        for image_slice in study.slices
+    ]
     return {
         "schema_version": "1.0.0",
         "study_id": study.study_id,
-        "model_id": result["model_id"],
-        "checkpoint_sha256": result["checkpoint_sha256"],
-        "device": result["device"],
+        "model_id": model.model_id,
+        "checkpoint_sha256": model.artifact_sha256,
+        "device": model.device or "unknown",
         "score_semantics": "Uncalibrated RSNA ICH slice-label scores; not a diagnosis",
         "class_1_label_semantics": (
             "RSNA ICH slice label 1 means hemorrhage annotated present; research score only"
         ),
         "slices": slice_scores,
     }
+
+
+@app.post(
+    "/v1/studies/{study_id}/inference-jobs",
+    response_model=InferenceJob,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["analysis"],
+)
+def create_inference_job(
+    study_id: UUID,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
+) -> InferenceJobRecord:
+    """Queue local checkpoint inference and return immediately with a pollable job ID."""
+    study = session.scalar(
+        select(StudyRecord)
+        .where(StudyRecord.study_id == study_id)
+        .options(selectinload(StudyRecord.slices))
+    )
+    if study is None:
+        raise HTTPException(status_code=404, detail="Study not found")
+    if not study.slices:
+        raise HTTPException(
+            status_code=409, detail="Upload a CT series before requesting inference"
+        )
+    active_job = session.scalar(
+        select(InferenceJobRecord)
+        .where(
+            InferenceJobRecord.study_id == study_id,
+            InferenceJobRecord.status.in_(("queued", "processing")),
+        )
+        .order_by(InferenceJobRecord.created_at.desc())
+        .limit(1)
+    )
+    if active_job is not None:
+        return active_job
+    last_job = session.scalar(
+        select(InferenceJobRecord)
+        .where(InferenceJobRecord.study_id == study_id)
+        .order_by(InferenceJobRecord.created_at.desc())
+        .limit(1)
+    )
+    if last_job is not None and last_job.status == "completed":
+        return last_job
+    job = InferenceJobRecord(
+        job_id=uuid4(),
+        study_id=study_id,
+        requested_by=principal.subject[:64],
+        status="queued",
+    )
+    study.status = "processing"
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    background_tasks.add_task(run_inference_job, job.job_id)
+    return job
+
+
+@app.get(
+    "/v1/studies/{study_id}/inference-jobs/{job_id}",
+    response_model=InferenceJob,
+    tags=["analysis"],
+)
+def get_inference_job(
+    study_id: UUID,
+    job_id: UUID,
+    session: Session = Depends(get_session),
+    _principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
+) -> InferenceJobRecord:
+    job = session.scalar(
+        select(InferenceJobRecord).where(
+            InferenceJobRecord.job_id == job_id,
+            InferenceJobRecord.study_id == study_id,
+        )
+    )
+    if job is None:
+        raise HTTPException(status_code=404, detail="Inference job not found")
+    return job
 
 
 @app.get(
@@ -338,6 +631,7 @@ def get_study_localizations(
     study_id: UUID,
     session: Session = Depends(get_session),
     _principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
 ) -> dict[str, object]:
     """Return real bounding boxes derived from the configured pretrained ICH mask model."""
     study = session.scalar(
@@ -404,24 +698,119 @@ def review_finding(
     request: FindingReviewRequest,
     session: Session = Depends(get_session),
     principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
 ) -> ReviewEventRecord:
     """Record one reviewer decision and preserve each decision in the audit log."""
 
     finding = session.scalar(
-        select(PersistedFindingRecord).where(
+        select(PersistedFindingRecord)
+        .where(
             PersistedFindingRecord.finding_id == finding_id,
             PersistedFindingRecord.study_id == study_id,
         )
+        .options(selectinload(PersistedFindingRecord.evidence))
+        .with_for_update()
     )
     if finding is None:
         raise HTTPException(status_code=404, detail="Finding not found")
+    previous_snapshot = _finding_snapshot(finding)
+    finding.revision += 1
     event = ReviewEventRecord(
         finding_id=finding_id,
         previous_review_status=finding.review_status,
         review_status=request.review_status,
+        action="review",
+        version=finding.revision,
+        previous_snapshot=previous_snapshot,
+        current_snapshot=_finding_snapshot(finding, status=request.review_status),
         reviewer=principal.reviewer_id,
     )
     finding.review_status = request.review_status
+    session.add(event)
+    session.commit()
+    session.refresh(event)
+    return event
+
+
+def _finding_snapshot(
+    finding: PersistedFindingRecord, *, status: str | None = None
+) -> dict[str, object]:
+    return {
+        "category": finding.category,
+        "confidence": finding.confidence,
+        "evidence_slice_ids": [str(item.slice_id) for item in finding.evidence],
+        "review_status": status or finding.review_status,
+        "revision": finding.revision,
+    }
+
+
+@app.put(
+    "/v1/studies/{study_id}/findings/{finding_id}",
+    response_model=FindingReviewEvent,
+    status_code=status.HTTP_201_CREATED,
+    tags=["review"],
+)
+def correct_finding(
+    study_id: UUID,
+    finding_id: UUID,
+    request: FindingCorrectionRequest,
+    session: Session = Depends(get_session),
+    principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
+) -> ReviewEventRecord:
+    """Apply an explicit human correction and preserve before/after values in the audit log."""
+    if request.confidence is None and request.evidence_slice_ids is None:
+        raise HTTPException(
+            status_code=422, detail="Provide confidence or evidence_slice_ids to edit"
+        )
+    finding = session.scalar(
+        select(PersistedFindingRecord)
+        .where(
+            PersistedFindingRecord.finding_id == finding_id,
+            PersistedFindingRecord.study_id == study_id,
+        )
+        .options(selectinload(PersistedFindingRecord.evidence))
+        .with_for_update()
+    )
+    if finding is None:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    previous_snapshot = _finding_snapshot(finding)
+    previous_status = finding.review_status
+    if request.evidence_slice_ids is not None:
+        study_slice_ids = set(
+            session.scalars(
+                select(StudySliceRecord.slice_id).where(StudySliceRecord.study_id == study_id)
+            ).all()
+        )
+        if not set(request.evidence_slice_ids).issubset(study_slice_ids):
+            raise HTTPException(
+                status_code=422, detail="Evidence slice must belong to the same study"
+            )
+        current_evidence = {item.slice_id: item for item in finding.evidence}
+        finding.evidence = [
+            current_evidence[slice_id]
+            for slice_id in request.evidence_slice_ids
+            if slice_id in current_evidence
+        ]
+        finding.evidence.extend(
+            FindingEvidenceRecord(finding_id=finding_id, slice_id=slice_id)
+            for slice_id in request.evidence_slice_ids
+            if slice_id not in current_evidence
+        )
+    if request.confidence is not None:
+        finding.confidence = request.confidence
+    finding.review_status = "uncertain"
+    finding.revision += 1
+    event = ReviewEventRecord(
+        finding_id=finding_id,
+        previous_review_status=previous_status,
+        review_status="uncertain",
+        action="edit",
+        version=finding.revision,
+        previous_snapshot=previous_snapshot,
+        current_snapshot=_finding_snapshot(finding),
+        reviewer=principal.reviewer_id,
+    )
     session.add(event)
     session.commit()
     session.refresh(event)
@@ -438,6 +827,7 @@ def list_finding_reviews(
     finding_id: UUID,
     session: Session = Depends(get_session),
     _principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
 ) -> list[ReviewEventRecord]:
     finding = session.scalar(
         select(PersistedFindingRecord).where(
@@ -462,6 +852,7 @@ def get_slice_dicom(
     slice_id: UUID,
     session: Session = Depends(get_session),
     _principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
 ) -> Response:
     """Stream one validated private CT slice as a non-cacheable Part 10 DICOM object."""
 
@@ -480,9 +871,7 @@ def get_slice_dicom(
     try:
         payload = path.read_bytes()
     except OSError as error:
-        raise HTTPException(
-            status_code=422, detail="Stored DICOM slice cannot be read"
-        ) from error
+        raise HTTPException(status_code=422, detail="Stored DICOM slice cannot be read") from error
 
     return Response(
         content=payload,
@@ -497,6 +886,7 @@ def get_slice_preview(
     slice_id: UUID,
     session: Session = Depends(get_session),
     _principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
 ) -> Response:
     """Render one validated private CT slice as a non-cacheable PNG preview."""
 
@@ -565,6 +955,7 @@ async def upload_dicom_series(
     files: list[UploadFile] = File(...),
     session: Session = Depends(get_session),
     _principal: Principal = Depends(require_authenticated_principal),
+    _owner: Principal = Depends(require_owned_study),
 ) -> StudyRecord:
     """Validate and privately store one anonymized, single-frame CT series."""
 
@@ -645,9 +1036,9 @@ async def upload_dicom_series(
         ordered = sorted(
             zip(staged, validated, strict=True),
             key=lambda item: (
-                item[1].slice_position if item[1].slice_position is not None else float(
-                    item[1].instance_number or 0
-                ),
+                item[1].slice_position
+                if item[1].slice_position is not None
+                else float(item[1].instance_number or 0),
                 item[1].sop_instance_uid or item[0].sha256,
             ),
         )
@@ -751,5 +1142,3 @@ async def upload_dicom_series(
             item.path.unlink(missing_ok=True)
         for upload in files:
             await upload.close()
-
-

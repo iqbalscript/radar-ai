@@ -9,6 +9,7 @@ import type {
   StudyLocalizations,
   StudyModelScores,
 } from "@radar-ai/contracts";
+import { apiFetch, assertValidUuid } from "@/lib/api-client";
 
 export const NON_CLINICAL_REPORT_DISCLAIMER =
   "PROTOTYPING ONLY — NOT FOR CLINICAL USE. Laporan ini adalah draf riset eksperimental berbantuan AI. Seluruh irisan DICOM wajib ditinjau secara mandiri oleh klinisi yang berwenang.";
@@ -248,6 +249,7 @@ export function ReportEditor({
   const [actionErrorCode, setActionErrorCode] = useState("");
   const [feedbackBanner, setFeedbackBanner] = useState("");
   const [lastSavedTime, setLastSavedTime] = useState<string>("");
+  const [savingToApi, setSavingToApi] = useState(false);
 
   const findingsTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -347,6 +349,115 @@ export function ReportEditor({
       generated,
       "Draf laporan berhasil disintesis ulang dari hasil inference AI terbaru."
     );
+  }
+
+  async function handleGenerateMetaDraft() {
+    if (!analysis?.findings.length) {
+      setActionError("Belum ada temuan tersimpan sebagai sumber draf laporan.");
+      setActionErrorCode("ERR_REPORT_SOURCE_REQUIRED");
+      return;
+    }
+    setSavingToApi(true);
+    setActionError("");
+    setActionErrorCode("");
+    try {
+      const safeStudyId = assertValidUuid(study.study_id, "Study ID");
+      const response = await apiFetch(
+        `/v1/studies/${safeStudyId}/reports/drafts`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
+      );
+      const result = (await response.json().catch(() => ({}))) as {
+        report_id?: string;
+        version?: number;
+        detail?: string;
+        model_id?: string | null;
+        content?: {
+          findings?: Array<{ text: string; finding_ids: string[] }>;
+          impression?: { text: string; finding_ids: string[] };
+          limitations?: string;
+        };
+      };
+      if (!response.ok || !result.content || !result.report_id) {
+        throw new Error(result.detail ?? `Draf Meta gagal dibuat (HTTP ${response.status}).`);
+      }
+      const findingText = result.content.findings
+        ?.map((item) => `${item.text} [Temuan: ${item.finding_ids.join(", ")}]`)
+        .join("\n") ?? "";
+      const nowIso = new Date().toISOString();
+      const nextDraft: ClinicalReportDraft = {
+        ...draft,
+        report_id: result.report_id,
+        findings: findingText,
+        impression: result.content.impression
+          ? `${result.content.impression.text} [Temuan: ${result.content.impression.finding_ids.join(", ")}]`
+          : draft.impression,
+        reviewer_notes: `${draft.reviewer_notes.trim()}\nMeta model: ${result.model_id ?? "unknown"}. Draf masih memerlukan review manusia.`.trim(),
+        status: "draft",
+        reviewer_id: reviewerId,
+        updated_at: nowIso,
+        signed_at: null,
+      };
+      persistDraft(
+        nextDraft,
+        `Draf Meta v${result.version ?? "?"} tersimpan di API. Periksa kutipan dan edit sebelum review.`
+      );
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "Draf Meta tidak dapat dibuat.");
+      setActionErrorCode("ERR_META_REPORT_DRAFT");
+    } finally {
+      setSavingToApi(false);
+    }
+  }
+
+  async function handleSaveManualDraftToApi() {
+    const sourceFindingIds = analysis?.findings.map((finding) => finding.finding_id) ?? [];
+    if (sourceFindingIds.length === 0) {
+      setActionError("Manual fallback memerlukan minimal satu temuan tersimpan untuk dikutip.");
+      setActionErrorCode("ERR_REPORT_SOURCE_REQUIRED");
+      return;
+    }
+    setSavingToApi(true);
+    setActionError("");
+    setActionErrorCode("");
+    try {
+      const safeStudyId = assertValidUuid(study.study_id, "Study ID");
+      const response = await apiFetch(
+        `/v1/studies/${safeStudyId}/reports/drafts`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            manual_content: {
+              findings: [
+                {
+                  text: draft.findings.trim() || "Manual reviewer draft.",
+                  finding_ids: sourceFindingIds,
+                },
+              ],
+              impression: {
+                text: draft.impression.trim() || "Requires human review.",
+                finding_ids: sourceFindingIds,
+              },
+              limitations:
+                draft.non_clinical_disclaimer || "Research prototype; not for clinical use.",
+            },
+          }),
+        }
+      );
+      const result = (await response.json().catch(() => ({}))) as {
+        version?: number;
+        detail?: string;
+      };
+      if (!response.ok) {
+        throw new Error(result.detail ?? `Simpan draf gagal (HTTP ${response.status}).`);
+      }
+      setFeedbackBanner(`Draf manual v${result.version ?? "?"} tersimpan di API dengan kutipan temuan.`);
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "Draf manual tidak dapat disimpan.");
+      setActionErrorCode("ERR_MANUAL_REPORT_SAVE");
+    } finally {
+      setSavingToApi(false);
+    }
   }
 
   function handleInsertActiveSliceCitation() {
@@ -530,6 +641,24 @@ export function ReportEditor({
           title="Sintesis ulang draf otomatis dari temuan model, skor DenseNet121, dan lokalisasi SAMIHS"
         >
           ✨ Buat / Perbarui Draf dari AI
+        </button>
+        <button
+          type="button"
+          className="button-primary button-sm"
+          onClick={() => void handleGenerateMetaDraft()}
+          disabled={savingToApi || !analysis?.findings.length}
+          title="Minta Meta membuat draf terstruktur dari temuan tersimpan saja"
+        >
+          {savingToApi ? "Menyimpan…" : "Buat Draf Meta"}
+        </button>
+        <button
+          type="button"
+          className="button-secondary button-sm"
+          onClick={() => void handleSaveManualDraftToApi()}
+          disabled={savingToApi || !analysis?.findings.length}
+          title="Simpan teks manual ke API dengan kutipan temuan tersimpan"
+        >
+          Simpan Draf Manual ke API
         </button>
         <button
           type="button"

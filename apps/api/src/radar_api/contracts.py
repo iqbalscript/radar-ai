@@ -50,9 +50,12 @@ class CreateStudyRequest(ContractModel):
 
 class ModelVersion(ContractModel):
     model_version_id: UUID
-    provider: Literal["meta_model_api", "approved_alternate", "demo_fixture"]
+    provider: Literal["meta_model_api", "local_checkpoint", "approved_alternate", "demo_fixture"]
     model_id: str = Field(min_length=1)
     prompt_version: str = Field(min_length=1)
+    preprocessing_version: str | None = None
+    artifact_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    device: str | None = None
 
 
 class Finding(ContractModel):
@@ -62,6 +65,7 @@ class Finding(ContractModel):
     confidence: float = Field(ge=0, le=1)
     review_status: FindingReviewStatus = FindingReviewStatus.PENDING
     model_version_id: UUID
+    revision: int = Field(default=1, ge=1)
 
 
 class StudyAnalysisResponse(ContractModel):
@@ -89,6 +93,44 @@ class StudyModelScores(ContractModel):
         "RSNA ICH slice label 1 means hemorrhage annotated present; research score only"
     ]
     slices: list[StudySliceScore] = Field(min_length=1)
+
+
+class InferenceJob(ContractModel):
+    job_id: UUID
+    study_id: UUID
+    status: Literal["queued", "processing", "completed", "failed"]
+    error_code: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ReportStatement(ContractModel):
+    text: str = Field(min_length=1, max_length=2000)
+    finding_ids: list[UUID] = Field(min_length=1)
+
+
+class ReportContent(ContractModel):
+    findings: list[ReportStatement] = Field(min_length=1, max_length=20)
+    impression: ReportStatement
+    limitations: str = Field(min_length=1, max_length=1000)
+
+
+class CreateReportDraftRequest(ContractModel):
+    manual_content: ReportContent | None = None
+
+
+class ReportDraft(ContractModel):
+    report_id: UUID
+    study_id: UUID
+    version: int = Field(ge=1)
+    status: Literal["draft", "approved", "rejected"]
+    source_finding_ids: list[UUID]
+    content: ReportContent
+    created_by: str
+    created_at: datetime
+    generation_mode: Literal["meta_model_api", "manual_fallback"]
+    model_id: str | None = None
 
 
 class Box2D(ContractModel):
@@ -124,11 +166,20 @@ class FindingReviewRequest(ContractModel):
     review_status: Literal["accepted", "rejected", "uncertain"]
 
 
+class FindingCorrectionRequest(ContractModel):
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    evidence_slice_ids: list[UUID] | None = Field(default=None, min_length=1)
+
+
 class FindingReviewEvent(ContractModel):
     review_event_id: UUID
     finding_id: UUID
     previous_review_status: FindingReviewStatus | None = None
     review_status: Literal["accepted", "rejected", "uncertain"]
+    action: Literal["review", "edit"] = "review"
+    version: int = Field(ge=1)
+    previous_snapshot: dict[str, object] | None = None
+    current_snapshot: dict[str, object] | None = None
     reviewer: str
     created_at: datetime
 

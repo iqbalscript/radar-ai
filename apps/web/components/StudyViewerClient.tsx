@@ -9,6 +9,7 @@ import type {
   StudyModelScores,
   StudyLocalizations,
   FindingReviewStatus,
+  InferenceJob,
 } from "@radar-ai/contracts";
 import { useAuth } from "@/components/AuthContext";
 import { StudyStatusBadge } from "@/components/ClinicalBadge";
@@ -43,12 +44,38 @@ type ViewerRenderMode = "dicom" | "preview";
 
 async function fetchModelScores(studyId: string): Promise<StudyModelScores> {
   const safeId = assertValidUuid(studyId, "Study ID");
-  const response = await apiFetch(`/v1/studies/${safeId}/scores`);
+  const response = await apiFetch(`/v1/studies/${safeId}/inference-jobs`, {
+    method: "POST",
+  });
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { detail?: string };
-    throw new Error(body.detail ?? `Skor model tidak tersedia (HTTP ${response.status}).`);
+    throw new Error(body.detail ?? `Inferensi tidak tersedia (HTTP ${response.status}).`);
   }
-  return (await response.json()) as StudyModelScores;
+  let job = (await response.json()) as InferenceJob;
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    if (job.status === "completed") break;
+    if (job.status === "failed") {
+      throw new Error(`Inferensi gagal (${job.error_code ?? "unknown_error"}).`);
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    const poll = await apiFetch(
+      `/v1/studies/${safeId}/inference-jobs/${assertValidUuid(job.job_id, "Job ID")}`
+    );
+    if (!poll.ok) {
+      const body = (await poll.json().catch(() => ({}))) as { detail?: string };
+      throw new Error(body.detail ?? `Status inferensi tidak tersedia (HTTP ${poll.status}).`);
+    }
+    job = (await poll.json()) as InferenceJob;
+  }
+  if (job.status !== "completed") {
+    throw new Error("Inferensi masih berjalan. Muat ulang studi untuk memeriksa statusnya.");
+  }
+  const responseScores = await apiFetch(`/v1/studies/${safeId}/scores`);
+  if (!responseScores.ok) {
+    const body = (await responseScores.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(body.detail ?? `Skor model tidak tersedia (HTTP ${responseScores.status}).`);
+  }
+  return (await responseScores.json()) as StudyModelScores;
 }
 
 async function fetchStudyLocalizations(studyId: string): Promise<StudyLocalizations> {
@@ -59,6 +86,12 @@ async function fetchStudyLocalizations(studyId: string): Promise<StudyLocalizati
     throw new Error(body.detail ?? `Lokalisasi lesi tidak tersedia (HTTP ${response.status}).`);
   }
   return (await response.json()) as StudyLocalizations;
+}
+
+async function fetchStudyAnalysis(studyId: string): Promise<StudyAnalysisResponse | null> {
+  const safeId = assertValidUuid(studyId, "Study ID");
+  const response = await apiFetch(`/v1/studies/${safeId}/analysis`);
+  return response.ok ? ((await response.json()) as StudyAnalysisResponse) : null;
 }
 
 export function StudyViewerClient({ studyId }: { studyId: string }) {
@@ -277,6 +310,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
         fetchModelScores(safeStudyId)
           .then((scores) => {
             setModelScores(scores);
+            void fetchStudyAnalysis(safeStudyId).then(setAnalysis);
             if (!userInteractedRef.current && scores.slices.length > 0) {
               const best = scores.slices.reduce((a, b) =>
                 b.class_1_score > a.class_1_score ? b : a
@@ -346,6 +380,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
       void fetchModelScores(safeStudyId)
         .then((scores) => {
           setModelScores(scores);
+          void fetchStudyAnalysis(safeStudyId).then(setAnalysis);
           if (
             !userInteractedRef.current &&
             !resolvedAnalysis?.findings.length &&
@@ -425,6 +460,9 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
           .then((scores) => {
             if (!ignore) {
               setModelScores(scores);
+              void fetchStudyAnalysis(safeStudyId).then((value) => {
+                if (!ignore) setAnalysis(value);
+              });
               if (
                 !userInteractedRef.current &&
                 !resolvedAnalysis?.findings.length &&
@@ -494,10 +532,7 @@ export function StudyViewerClient({ studyId }: { studyId: string }) {
       );
       return;
     }
-    const hasConfiguredApiKey = Boolean(
-      (process.env.NEXT_PUBLIC_RADAR_API_KEY ?? "").trim()
-    );
-    if (authRequired && !user && !hasConfiguredApiKey) {
+    if (authRequired && !user) {
       setReviewError(
         "Silakan login dengan akun peneliti (Firebase OAuth) untuk mencatat keputusan review."
       );

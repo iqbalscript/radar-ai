@@ -36,7 +36,10 @@ This is the shared contract for the web and API workstreams in RDA-18. Python mo
     "model_version_id": "00000000-0000-4000-8000-000000000004",
     "provider": "meta_model_api",
     "model_id": "muse-spark-1.3",
-    "prompt_version": "radar-findings-v1"
+    "prompt_version": "radar-findings-v1",
+    "preprocessing_version": "densenet121-ct-preprocessing/v2",
+    "artifact_sha256": "<checkpoint sha256>",
+    "device": "cpu"
   }
 }
 ```
@@ -68,9 +71,15 @@ the study has no completed analysis. It never generates a placeholder finding. R
 are submitted through `POST /v1/studies/{study_id}/findings/{finding_id}/review` with
 `{"review_status":"accepted"}`, `rejected`, or `uncertain`. Each decision is stored in
 `finding_review_events` and can be read from the corresponding `/reviews` route. Reviewer identity
-is currently the fixed local value `local-reviewer`; a real multi-user audit trail requires
-authentication before deployment. Each audit event stores both the previous and newly selected
-review status.
+uses the verified caller identity in production (or `local-reviewer` in local development). Each
+audit event stores both the previous and newly selected review status. Study metadata, files,
+scores, findings, reports, and job status are scoped to the authenticated study owner. A caller
+that does not own a study receives `404`.
+
+`PUT /v1/studies/{study_id}/findings/{finding_id}` accepts a corrected confidence and/or evidence
+slice IDs. Evidence must belong to the same study. An edit moves the finding back to `uncertain`
+for another explicit decision, increments its revision, and stores before/after snapshots in the
+append-only review event log. Review actions also increment the revision and retain snapshots.
 
 ### Upload one anonymized CT series
 
@@ -90,6 +99,36 @@ Configurable limits are `RADAR_MAX_DICOM_FILE_BYTES` (64 MiB per file),
 `RADAR_MAX_DICOM_PIXELS` (16,777,216 pixels per image). A size or file-count overflow returns `413`,
 invalid or identifiable DICOM returns `422`, an unknown study returns `404`, and a study that already
 has a series returns `409`.
+
+### Background inference and traceability
+
+- `POST /v1/studies/{study_id}/inference-jobs` returns a persisted job with `202 Accepted` and a
+  `job_id`. Repeated requests reuse the active job or the latest completed job.
+- `GET /v1/studies/{study_id}/inference-jobs/{job_id}` is the polling endpoint. Status is one of
+  `queued`, `processing`, `completed`, or `failed`; failure responses expose a stable error code,
+  never exception text or filesystem paths.
+- `GET /v1/studies/{study_id}/scores` returns only persisted scores from the latest local analysis.
+  It returns `404` until a local inference job completes.
+- The API persists one `hemorrhage_absent` and `hemorrhage_present` score per slice with the study,
+  slice, analysis, and model-version IDs. The model version stores checkpoint SHA-256, device,
+  preprocessing version, and model ID. Findings cite exact positive-score slices and begin in
+  `pending` review status.
+- Inference uses only a locally provisioned DenseNet121 checkpoint. If `RADAR_CT_CHECKPOINT` is
+  missing or invalid, the job becomes `failed` with `model_unavailable`; it never fabricates a
+  completed result. Configure `RADAR_ICH_SCORE_THRESHOLD` only for research threshold experiments.
+
+### Source-cited report drafts
+
+- `POST /v1/studies/{study_id}/reports/drafts` generates a Meta draft from persisted, de-identified
+  findings using structured JSON output. The model receives finding IDs, category, scores, review
+  state, and evidence slice IDs; it does not receive DICOM bytes, patient identifiers, or study
+  metadata. The API rejects citations that do not exist in the saved analysis.
+- The output is an unsigned `draft`. Its statements must cite one or more source finding IDs; all
+  drafts remain subject to human review and are research-only.
+- If Meta is not configured or unavailable, the endpoint returns `503` with a manual fallback
+  instruction. Send `manual_content` in the same request to store an explicitly manual, cited draft.
+- `GET /v1/studies/{study_id}/reports/drafts` returns immutable versioned drafts in newest-first
+  order. A later manual or generated draft creates a new version.
 
 ## Meta model access check
 
